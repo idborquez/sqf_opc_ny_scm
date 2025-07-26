@@ -1,0 +1,1170 @@
+---
+title: "sqf_opc_covars_acs"
+author: "Ignacio Borquez"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## Packages
+```{r}
+# Remove all objects from the environment
+rm(list = ls())
+
+# Perform garbage collection to free up memory
+gc()
+
+
+library(censusapi)
+library(tidyverse)
+library(areal)
+library(sf)
+
+#setwd("")
+```
+
+# ACS data
+```{r}
+covars <- c("tot_pop",
+            "md_age",
+            "p_male",
+            "p_black",
+            "p_white",
+            "p_latino",
+            "p_employed",
+            "p_hsch_25",
+            "p_hsch_16d",
+            "md_incm",
+            "md_value",
+            "md_yr_bld",
+            "p_vcnt_h",
+            "p_poverty")
+
+get_census_vars <- function(year){
+  name_code = str_c(year, "/acs/acs5")
+  target_vars <- c("STATE",
+                   "NAME",
+                   "B01001_001E", # Total population
+                    "B01001_002E", # Population male
+                    "B03002_001E", # Total
+                    "B03002_003E", # White alone, not Hispanic 
+                    "B03002_001E", # Total
+                    "B03002_004E", # Black, not Hispanic 
+                    "B03001_001E", # Hispanic total
+                    "B03001_003E", # Hispanic
+                    "B01002_001E", # Median age
+                    "B23025_001E", # Estimate!!Total!!
+                    "B23025_004E", # Estimate!!Total!!In labor force!!Civilian labor force!!Employed
+                    "B23006_001E", # 26 to 64 education total
+                    "B23006_002E", # 26 to 64 les high shoool diploma
+                    "B06011_001E", # Median income
+                    "B25107_001E", # Median value
+                    "B25035_001E", # Median year construction
+                    "B25002_003E", # vacant
+                    "B25001_001E", # total housing units
+                    "B10059_002E", # percent income below poverty level 12 months
+                    "B10059_001E", # total percent income below poverty level 12 months 
+                    "B14005_012E",
+                    "B14005_026E",
+                    "B14005_001E"
+                   )
+
+  if(year > 2017){
+    target_vars <- c(target_vars)
+  }
+
+  census_dat <- getCensus(
+    name= name_code,
+    region = "tract:*",
+    regionin="state:36",
+    vars = target_vars
+  )
+
+
+output_df <- census_dat %>%
+    group_by(STATE, NAME, county, tract) %>%
+    mutate(YEAR = year) %>%
+    mutate(tot_pop = B01001_001E,
+            md_age = B01002_001E,
+            p_male = B01001_002E/B01001_001E,
+            p_black = B03002_004E/B03002_001E,
+            p_white = B03002_003E/B03002_001E,
+            p_latino = B03001_003E/B03001_001E,
+            p_employed = B23025_004E/B23025_001E,
+            p_hsch_25 = B23006_002E/B23006_001E,
+            p_hsch_16d = (B14005_012E+B14005_026E)/B14005_001E,
+            md_incm = B06011_001E,
+            md_value = B25107_001E,
+            md_yr_bld = B25035_001E,
+            p_vcnt_h = B25002_003E/B25001_001E,
+            p_poverty = B10059_002E/B10059_001E) %>%
+    select(STATE, NAME, YEAR, county, tract, tot_pop, md_age, p_male, p_black, p_white, p_latino, p_employed, p_hsch_25, p_hsch_16d,
+           md_incm, md_value, md_yr_bld, p_vcnt_h, p_poverty) %>%
+    mutate(GEOID = str_c(STATE, county, tract)) %>%
+    select(STATE, YEAR, everything())
+  return(output_df)
+}
+
+Sys.setenv(CENSUS_KEY="")
+ 
+census_2017 <- get_census_vars(2017)
+census_2018 <- get_census_vars(2018)
+census_2019 <- get_census_vars(2019)
+census_2020 <- get_census_vars(2020)
+census_2021 <- get_census_vars(2021)
+census_2022 <- get_census_vars(2022)
+census_2023 <- get_census_vars(2023)
+```
+
+## Check values of covariates
+```{r}
+w_5min <- read_rds("highres5min.rds")
+w_10min <- read_rds("highres10min.rds")
+
+w_5min <- st_transform(w_5min, crs = "EPSG:32118")
+w_10min <- st_transform(w_10min, crs = "EPSG:32118")
+```
+
+## Join to census shape file - 5min
+### 2017
+```{r}
+shape17 <- st_read("Covariates/tl_2017_36_tract.shp")
+
+CRS.new <- st_crs("EPSG:32118") # defines new crs to apply to .shp file
+shape17_v2 <- st_transform(shape17, CRS.new) # changes crs for .shp file
+st_crs(shape17_v2) # recheck 
+st_crs(w_5min) # recheck 
+
+shape17_v2_j <- left_join(shape17_v2, census_2017, by = "GEOID")
+
+shape17_v2_j <- left_join(shape17_v2, census_2017, by = "GEOID") %>%
+  mutate(md_age = if_else(md_age < 0, NA, md_age),
+         md_incm = if_else(md_incm < 0, NA, md_incm),
+         md_yr_bld = if_else(md_yr_bld <= 0, NA, md_yr_bld),
+         md_value = if_else(md_value < 0, NA, md_value))
+
+interp2017_tot_pop <- st_interpolate_aw(shape17_v2_j %>% select(tot_pop), w_5min,
+                                    extensive = TRUE, na.rm = TRUE)
+
+interp2017_age <- st_interpolate_aw(shape17_v2_j %>% select(md_age), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2017_male <- st_interpolate_aw(shape17_v2_j %>% select(p_male), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2017_black <- st_interpolate_aw(shape17_v2_j %>% select(p_black), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2017_white <- st_interpolate_aw(shape17_v2_j %>% select(p_white), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2017_latino <- st_interpolate_aw(shape17_v2_j %>% select(p_latino), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2017_p_employed <- st_interpolate_aw(shape17_v2_j %>% select(p_employed), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2017_p_hsch_25 <- st_interpolate_aw(shape17_v2_j %>% select(p_hsch_25), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2017_p_hsch_16d <- st_interpolate_aw(shape17_v2_j %>% select(p_hsch_16d), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2017_p_inc <- st_interpolate_aw(shape17_v2_j %>% select(md_incm), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2017_value <- st_interpolate_aw(shape17_v2_j %>% select(md_value), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2017_year_build <- st_interpolate_aw(shape17_v2_j %>% select(md_yr_bld), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2017_vacant <- st_interpolate_aw(shape17_v2_j %>% select(p_vcnt_h), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2017_p_poverty <- st_interpolate_aw(shape17_v2_j %>% select(p_poverty), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2017_comp <- cbind(interp2017_tot_pop, interp2017_age, interp2017_male, interp2017_black, interp2017_white,
+                         interp2017_latino, interp2017_p_employed, interp2017_p_hsch_25, interp2017_p_hsch_16d,
+                         interp2017_p_inc, interp2017_value, interp2017_year_build, interp2017_vacant, interp2017_p_poverty) %>%
+  bind_cols(w_5min)
+
+interp2017_comp <- interp2017_comp %>%
+  select(name, geometry.1, tot_pop, 
+         p_male, md_age, p_white, p_black, p_latino, 
+         p_hsch_25, p_hsch_16d, p_employed, md_incm, p_poverty,
+         p_vcnt_h, md_yr_bld, md_value) %>%
+  rename(geometry = geometry.1)
+
+interp2017_comp$year <- 2017
+summary(interp2017_comp)
+```
+
+### 2018
+```{r}
+shape18 <- st_read("Covariates/tl_2018_36_tract.shp")
+shape18_v2 <- st_transform(shape18, CRS.new) # changes crs for .shp file
+st_crs(shape18_v2) # recheck to be sure transformation was successful
+
+shape18_v2_j <- left_join(shape18_v2, census_2018, by = "GEOID")
+
+shape18_v2_j <- left_join(shape18_v2, census_2018, by = "GEOID") %>%
+  mutate(md_age = if_else(md_age < 0, NA, md_age),
+         md_incm = if_else(md_incm < 0, NA, md_incm),
+         md_yr_bld = if_else(md_yr_bld <= 0, NA, md_yr_bld),
+         md_value = if_else(md_value < 0, NA, md_value))
+
+interp2018_tot_pop <- st_interpolate_aw(shape18_v2_j %>% select(tot_pop), w_5min,
+                                    extensive = TRUE, na.rm = TRUE)
+
+interp2018_age <- st_interpolate_aw(shape18_v2_j %>% select(md_age), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2018_male <- st_interpolate_aw(shape18_v2_j %>% select(p_male), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2018_black <- st_interpolate_aw(shape18_v2_j %>% select(p_black), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2018_white <- st_interpolate_aw(shape18_v2_j %>% select(p_white), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2018_latino <- st_interpolate_aw(shape18_v2_j %>% select(p_latino), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2018_p_employed <- st_interpolate_aw(shape18_v2_j %>% select(p_employed), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2018_p_hsch_25 <- st_interpolate_aw(shape18_v2_j %>% select(p_hsch_25), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2018_p_hsch_16d <- st_interpolate_aw(shape18_v2_j %>% select(p_hsch_16d), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2018_p_inc <- st_interpolate_aw(shape18_v2_j %>% select(md_incm), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2018_value <- st_interpolate_aw(shape18_v2_j %>% select(md_value), w_5min,
+                                    extensive = FALSE, na.rm = TRUE, keep_NA = TRUE)
+
+interp2018_year_build <- st_interpolate_aw(shape18_v2_j %>% select(md_yr_bld), w_5min,
+                                    extensive = FALSE, na.rm = TRUE, keep_NA = TRUE) 
+
+interp2018_vacant <- st_interpolate_aw(shape18_v2_j %>% select(p_vcnt_h), w_5min,
+                                    extensive = FALSE, na.rm = TRUE) 
+
+interp2018_p_poverty <- st_interpolate_aw(shape18_v2_j %>% select(p_poverty), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2018_comp <- cbind(interp2018_tot_pop, interp2018_age, interp2018_male, interp2018_black, interp2018_white,
+                         interp2018_latino, interp2018_p_employed, interp2018_p_hsch_25, interp2018_p_hsch_16d,
+                         interp2018_p_inc, interp2018_value, interp2018_year_build, interp2018_vacant, interp2018_p_poverty) %>%
+  bind_cols(w_5min)
+
+interp2018_comp <- interp2018_comp %>%
+  select(name, geometry.1, tot_pop, 
+         p_male, md_age, p_white, p_black, p_latino, 
+         p_hsch_25, p_hsch_16d, p_employed, md_incm, p_poverty,
+         p_vcnt_h, md_yr_bld, md_value) %>%
+  rename(geometry = geometry.1)
+
+interp2018_comp$year <- 2018
+summary(interp2018_comp)
+```
+
+### 2019
+```{r}
+shape19 <- st_read("Covariates/tl_2019_36_tract.shp")
+shape19_v2 <- st_transform(shape19, CRS.new) # changes crs for .shp file
+st_crs(shape19_v2) # recheck to be sure transformation was successful
+
+shape19_v2_j <- left_join(shape19_v2, census_2019, by = "GEOID")
+
+shape19_v2_j <- left_join(shape19_v2, census_2019, by = "GEOID") %>%
+  mutate(md_age = if_else(md_age < 0, NA, md_age),
+         md_incm = if_else(md_incm < 0, NA, md_incm),
+         md_yr_bld = if_else(md_yr_bld <= 0, NA, md_yr_bld),
+         md_value = if_else(md_value < 0, NA, md_value))
+
+interp2019_tot_pop <- st_interpolate_aw(shape19_v2_j %>% select(tot_pop), w_5min,
+                                    extensive = TRUE, na.rm = TRUE)
+
+interp2019_age <- st_interpolate_aw(shape19_v2_j %>% select(md_age), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2019_male <- st_interpolate_aw(shape19_v2_j %>% select(p_male), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2019_black <- st_interpolate_aw(shape19_v2_j %>% select(p_black), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2019_white <- st_interpolate_aw(shape19_v2_j %>% select(p_white), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2019_latino <- st_interpolate_aw(shape19_v2_j %>% select(p_latino), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2019_p_employed <- st_interpolate_aw(shape19_v2_j %>% select(p_employed), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2019_p_hsch_25 <- st_interpolate_aw(shape19_v2_j %>% select(p_hsch_25), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2019_p_hsch_16d <- st_interpolate_aw(shape19_v2_j %>% select(p_hsch_16d), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2019_p_inc <- st_interpolate_aw(shape19_v2_j %>% select(md_incm), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2019_value <- st_interpolate_aw(shape19_v2_j %>% select(md_value), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2019_year_build <- st_interpolate_aw(shape19_v2_j %>% select(md_yr_bld), w_5min,
+                                    extensive = FALSE, na.rm = TRUE, keep_NA = TRUE) 
+
+interp2019_vacant <- st_interpolate_aw(shape19_v2_j %>% select(p_vcnt_h), w_5min,
+                                    extensive = FALSE, na.rm = TRUE) 
+
+interp2019_p_poverty <- st_interpolate_aw(shape19_v2_j %>% select(p_poverty), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2019_comp <- cbind(interp2019_tot_pop, interp2019_age, interp2019_male, interp2019_black, interp2019_white,
+                         interp2019_latino, interp2019_p_employed, interp2019_p_hsch_25, interp2019_p_hsch_16d,
+                         interp2019_p_inc, interp2019_value, interp2019_year_build, interp2019_vacant, interp2019_p_poverty) %>%
+  bind_cols(w_5min)
+
+interp2019_comp <- interp2019_comp %>%
+  select(name, geometry.1, tot_pop, 
+         p_male, md_age, p_white, p_black, p_latino, 
+         p_hsch_25, p_hsch_16d, p_employed, md_incm, p_poverty,
+         p_vcnt_h, md_yr_bld, md_value) %>%
+  rename(geometry = geometry.1)
+
+interp2019_comp$year <- 2019
+summary(interp2019_comp)
+```
+
+### 2020
+```{r}
+shape20 <- st_read("Covariates/tl_2020_36_tract.shp")
+shape20_v2 <- st_transform(shape20, CRS.new) # changes crs for .shp file
+st_crs(shape20_v2) # recheck to be sure transformation was successful
+
+shape20_v2_j <- left_join(shape20_v2, census_2020, by = "GEOID")
+
+summary(shape20_v2_j)
+
+shape20_v2_j <- left_join(shape20_v2, census_2020, by = "GEOID") %>%
+  mutate(md_age = if_else(md_age < 0, NA, md_age),
+         md_incm = if_else(md_incm < 0, NA, md_incm),
+         md_yr_bld = if_else(md_yr_bld <= 0, NA, md_yr_bld),
+         md_value = if_else(md_value < 0, NA, md_value))
+
+interp2020_tot_pop <- st_interpolate_aw(shape20_v2_j %>% select(tot_pop), w_5min,
+                                    extensive = TRUE, na.rm = TRUE)
+
+interp2020_age <- st_interpolate_aw(shape20_v2_j %>% select(md_age), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2020_male <- st_interpolate_aw(shape20_v2_j %>% select(p_male), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2020_black <- st_interpolate_aw(shape20_v2_j %>% select(p_black), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2020_white <- st_interpolate_aw(shape20_v2_j %>% select(p_white), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2020_latino <- st_interpolate_aw(shape20_v2_j %>% select(p_latino), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2020_p_employed <- st_interpolate_aw(shape20_v2_j %>% select(p_employed), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2020_p_hsch_25 <- st_interpolate_aw(shape20_v2_j %>% select(p_hsch_25), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2020_p_hsch_16d <- st_interpolate_aw(shape20_v2_j %>% select(p_hsch_16d), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2020_p_inc <- st_interpolate_aw(shape20_v2_j %>% select(md_incm), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2020_value <- st_interpolate_aw(shape20_v2_j %>% select(md_value), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2020_year_build <- st_interpolate_aw(shape20_v2_j %>% select(md_yr_bld), w_5min,
+                                    extensive = FALSE, na.rm = TRUE, keep_NA = TRUE) 
+
+interp2020_vacant <- st_interpolate_aw(shape20_v2_j %>% select(p_vcnt_h), w_5min,
+                                    extensive = FALSE, na.rm = TRUE) 
+
+interp2020_p_poverty <- st_interpolate_aw(shape20_v2_j %>% select(p_poverty), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2020_comp <- cbind(interp2020_tot_pop, interp2020_age, interp2020_male, interp2020_black, interp2020_white,
+                         interp2020_latino, interp2020_p_employed, interp2020_p_hsch_25, interp2020_p_hsch_16d,
+                         interp2020_p_inc, interp2020_value, interp2020_year_build, interp2020_vacant, interp2020_p_poverty) %>%
+  bind_cols(w_5min)
+
+interp2020_comp <- interp2020_comp %>%
+  select(name, geometry.1, tot_pop, 
+         p_male, md_age, p_white, p_black, p_latino, 
+         p_hsch_25, p_hsch_16d, p_employed, md_incm, p_poverty,
+         p_vcnt_h, md_yr_bld, md_value) %>%
+  rename(geometry = geometry.1)
+
+interp2020_comp$year <- 2020
+summary(interp2020_comp)
+```
+
+### 2021
+```{r}
+shape21 <- st_read("Covariates/tl_2021_36_tract.shp")
+shape21_v2 <- st_transform(shape21, CRS.new) # changes crs for .shp file
+st_crs(shape21_v2) # recheck to be sure transformation was successful
+
+shape21_v2_j <- left_join(shape21_v2, census_2021, by = "GEOID")
+
+shape21_v2_j <- left_join(shape21_v2, census_2021, by = "GEOID") %>%
+  mutate(md_age = if_else(md_age < 0, NA, md_age),
+         md_incm = if_else(md_incm < 0, NA, md_incm),
+         md_yr_bld = if_else(md_yr_bld <= 0, NA, md_yr_bld),
+         md_value = if_else(md_value < 0, NA, md_value))
+
+interp2021_tot_pop <- st_interpolate_aw(shape21_v2_j %>% select(tot_pop), w_5min,
+                                    extensive = TRUE, na.rm = TRUE)
+
+interp2021_age <- st_interpolate_aw(shape21_v2_j %>% select(md_age), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2021_male <- st_interpolate_aw(shape21_v2_j %>% select(p_male), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2021_black <- st_interpolate_aw(shape21_v2_j %>% select(p_black), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2021_white <- st_interpolate_aw(shape21_v2_j %>% select(p_white), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2021_latino <- st_interpolate_aw(shape21_v2_j %>% select(p_latino), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2021_p_employed <- st_interpolate_aw(shape21_v2_j %>% select(p_employed), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2021_p_hsch_25 <- st_interpolate_aw(shape21_v2_j %>% select(p_hsch_25), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2021_p_hsch_16d <- st_interpolate_aw(shape21_v2_j %>% select(p_hsch_16d), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2021_p_inc <- st_interpolate_aw(shape21_v2_j %>% select(md_incm), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2021_value <- st_interpolate_aw(shape21_v2_j %>% select(md_value), w_5min,
+                                    extensive = FALSE, na.rm = TRUE, keep_NA = TRUE)
+
+interp2021_year_build <- st_interpolate_aw(shape21_v2_j %>% select(md_yr_bld), w_5min,
+                                    extensive = FALSE, na.rm = TRUE, keep_NA = TRUE) 
+
+interp2021_vacant <- st_interpolate_aw(shape21_v2_j %>% select(p_vcnt_h), w_5min,
+                                    extensive = FALSE, na.rm = TRUE) 
+
+interp2021_p_poverty <- st_interpolate_aw(shape21_v2_j %>% select(p_poverty), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2021_comp <- cbind(interp2021_tot_pop, interp2021_age, interp2021_male, interp2021_black, interp2021_white,
+                         interp2021_latino, interp2021_p_employed, interp2021_p_hsch_25, interp2021_p_hsch_16d,
+                         interp2021_p_inc, interp2021_value, interp2021_year_build, interp2021_vacant, interp2021_p_poverty) %>%
+  bind_cols(w_5min)
+
+interp2021_comp <- interp2021_comp %>%
+  select(name, geometry.1, tot_pop, 
+         p_male, md_age, p_white, p_black, p_latino, 
+         p_hsch_25, p_hsch_16d, p_employed, md_incm, p_poverty,
+         p_vcnt_h, md_yr_bld, md_value) %>%
+  rename(geometry = geometry.1)
+
+interp2021_comp$year <- 2021
+summary(interp2021_comp)
+```
+
+### 2022
+```{r}
+shape22 <- st_read("Covariates/tl_2022_36_tract.shp")
+shape22_v2 <- st_transform(shape22, CRS.new) # changes crs for .shp file
+st_crs(shape22_v2) # recheck to be sure transformation was successful
+
+shape22_v2_j <- left_join(shape22_v2, census_2022, by = "GEOID")
+
+shape22_v2_j <- left_join(shape22_v2, census_2022, by = "GEOID") %>%
+  mutate(md_age = if_else(md_age < 0, NA, md_age),
+         md_incm = if_else(md_incm < 0, NA, md_incm),
+         md_yr_bld = if_else(md_yr_bld <= 0, NA, md_yr_bld),
+         md_value = if_else(md_value < 0, NA, md_value))
+
+interp2022_tot_pop <- st_interpolate_aw(shape22_v2_j %>% select(tot_pop), w_5min,
+                                    extensive = TRUE, na.rm = TRUE)
+
+interp2022_age <- st_interpolate_aw(shape22_v2_j %>% select(md_age), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2022_male <- st_interpolate_aw(shape22_v2_j %>% select(p_male), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2022_black <- st_interpolate_aw(shape22_v2_j %>% select(p_black), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2022_white <- st_interpolate_aw(shape22_v2_j %>% select(p_white), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2022_latino <- st_interpolate_aw(shape22_v2_j %>% select(p_latino), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2022_p_employed <- st_interpolate_aw(shape22_v2_j %>% select(p_employed), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2022_p_hsch_25 <- st_interpolate_aw(shape22_v2_j %>% select(p_hsch_25), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2022_p_hsch_16d <- st_interpolate_aw(shape22_v2_j %>% select(p_hsch_16d), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2022_p_inc <- st_interpolate_aw(shape22_v2_j %>% select(md_incm), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2022_value <- st_interpolate_aw(shape22_v2_j %>% select(md_value), w_5min,
+                                    extensive = FALSE, na.rm = TRUE, keep_NA = TRUE)
+
+interp2022_year_build <- st_interpolate_aw(shape22_v2_j %>% select(md_yr_bld), w_5min,
+                                    extensive = FALSE, na.rm = TRUE, keep_NA = TRUE) 
+
+interp2022_vacant <- st_interpolate_aw(shape22_v2_j %>% select(p_vcnt_h), w_5min,
+                                    extensive = FALSE, na.rm = TRUE) 
+
+interp2022_p_poverty <- st_interpolate_aw(shape22_v2_j %>% select(p_poverty), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2022_comp <- cbind(interp2022_tot_pop, interp2022_age, interp2022_male, interp2022_black, interp2022_white,
+                         interp2022_latino, interp2022_p_employed, interp2022_p_hsch_25, interp2022_p_hsch_16d,
+                         interp2022_p_inc, interp2022_value, interp2022_year_build, interp2022_vacant, interp2022_p_poverty) %>%
+  bind_cols(w_5min)
+
+interp2022_comp <- interp2022_comp %>%
+  select(name, geometry.1, tot_pop, 
+         p_male, md_age, p_white, p_black, p_latino, 
+         p_hsch_25, p_hsch_16d, p_employed, md_incm, p_poverty,
+         p_vcnt_h, md_yr_bld, md_value) %>%
+  rename(geometry = geometry.1)
+
+interp2022_comp$year <- 2022
+summary(interp2022_comp)
+```
+
+
+### 2023
+```{r}
+shape23 <- st_read("Covariates/tl_2023_36_tract.shp")
+shape23_v2 <- st_transform(shape23, CRS.new) # changes crs for .shp file
+st_crs(shape23_v2) # recheck to be sure transformation was successful
+
+shape23_v2_j <- left_join(shape23_v2, census_2023, by = "GEOID")
+
+shape23_v2_j <- left_join(shape23_v2, census_2023, by = "GEOID") %>%
+  mutate(md_age = if_else(md_age < 0, NA, md_age),
+         md_incm = if_else(md_incm < 0, NA, md_incm),
+         md_yr_bld = if_else(md_yr_bld <= 0, NA, md_yr_bld),
+         md_value = if_else(md_value < 0, NA, md_value))
+
+interp2023_tot_pop <- st_interpolate_aw(shape23_v2_j %>% select(tot_pop), w_5min,
+                                    extensive = TRUE, na.rm = TRUE)
+
+interp2023_age <- st_interpolate_aw(shape23_v2_j %>% select(md_age), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2023_male <- st_interpolate_aw(shape23_v2_j %>% select(p_male), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2023_black <- st_interpolate_aw(shape23_v2_j %>% select(p_black), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2023_white <- st_interpolate_aw(shape23_v2_j %>% select(p_white), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2023_latino <- st_interpolate_aw(shape23_v2_j %>% select(p_latino), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2023_p_employed <- st_interpolate_aw(shape23_v2_j %>% select(p_employed), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2023_p_hsch_25 <- st_interpolate_aw(shape23_v2_j %>% select(p_hsch_25), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2023_p_hsch_16d <- st_interpolate_aw(shape23_v2_j %>% select(p_hsch_16d), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2023_p_inc <- st_interpolate_aw(shape23_v2_j %>% select(md_incm), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2023_value <- st_interpolate_aw(shape23_v2_j %>% select(md_value), w_5min,
+                                    extensive = FALSE, na.rm = TRUE, keep_NA = TRUE)
+
+interp2023_year_build <- st_interpolate_aw(shape23_v2_j %>% select(md_yr_bld), w_5min,
+                                    extensive = FALSE, na.rm = TRUE, keep_NA = TRUE) 
+
+interp2023_vacant <- st_interpolate_aw(shape23_v2_j %>% select(p_vcnt_h), w_5min,
+                                    extensive = FALSE, na.rm = TRUE) 
+
+interp2023_p_poverty <- st_interpolate_aw(shape23_v2_j %>% select(p_poverty), w_5min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2023_comp <- cbind(interp2023_tot_pop, interp2023_age, interp2023_male, interp2023_black, interp2023_white,
+                         interp2023_latino, interp2023_p_employed, interp2023_p_hsch_25, interp2023_p_hsch_16d,
+                         interp2023_p_inc, interp2023_value, interp2023_year_build, interp2023_vacant, interp2023_p_poverty) %>%
+  bind_cols(w_5min)
+
+interp2023_comp <- interp2023_comp %>%
+  select(name, geometry.1, tot_pop, 
+         p_male, md_age, p_white, p_black, p_latino, 
+         p_hsch_25, p_hsch_16d, p_employed, md_incm, p_poverty,
+         p_vcnt_h, md_yr_bld, md_value) %>%
+  rename(geometry = geometry.1)
+
+interp2023_comp$year <- 2023
+summary(interp2023_comp)
+```
+
+## Final dataset
+```{r}
+df_5min_covar <- rbind(interp2017_comp, interp2018_comp, interp2019_comp,
+                      interp2020_comp, interp2021_comp, interp2022_comp,
+                      interp2023_comp)
+
+summary(df_5min_covar)
+
+save(df_5min_covar, file = "df_5min_covar.RData")
+```
+
+
+## Join to census shape file - 10min
+### 2017
+```{r}
+shape17 <- st_read("Covariates/tl_2017_36_tract.shp")
+
+CRS.new <- st_crs("EPSG:32118") # defines new crs to apply to .shp file
+shape17_v2 <- st_transform(shape17, CRS.new) # changes crs for .shp file
+st_crs(shape17_v2) # recheck 
+st_crs(w_10min) # recheck 
+
+shape17_v2_j <- left_join(shape17_v2, census_2017, by = "GEOID")
+
+shape17_v2_j <- left_join(shape17_v2, census_2017, by = "GEOID") %>%
+  mutate(md_age = if_else(md_age < 0, NA, md_age),
+         md_incm = if_else(md_incm < 0, NA, md_incm),
+         md_yr_bld = if_else(md_yr_bld <= 0, NA, md_yr_bld),
+         md_value = if_else(md_value < 0, NA, md_value))
+
+interp2017_tot_pop <- st_interpolate_aw(shape17_v2_j %>% select(tot_pop), w_10min,
+                                    extensive = TRUE, na.rm = TRUE)
+
+interp2017_age <- st_interpolate_aw(shape17_v2_j %>% select(md_age), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2017_male <- st_interpolate_aw(shape17_v2_j %>% select(p_male), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2017_black <- st_interpolate_aw(shape17_v2_j %>% select(p_black), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2017_white <- st_interpolate_aw(shape17_v2_j %>% select(p_white), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2017_latino <- st_interpolate_aw(shape17_v2_j %>% select(p_latino), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2017_p_employed <- st_interpolate_aw(shape17_v2_j %>% select(p_employed), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2017_p_hsch_25 <- st_interpolate_aw(shape17_v2_j %>% select(p_hsch_25), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2017_p_hsch_16d <- st_interpolate_aw(shape17_v2_j %>% select(p_hsch_16d), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2017_p_inc <- st_interpolate_aw(shape17_v2_j %>% select(md_incm), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2017_value <- st_interpolate_aw(shape17_v2_j %>% select(md_value), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2017_year_build <- st_interpolate_aw(shape17_v2_j %>% select(md_yr_bld), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2017_vacant <- st_interpolate_aw(shape17_v2_j %>% select(p_vcnt_h), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2017_p_poverty <- st_interpolate_aw(shape17_v2_j %>% select(p_poverty), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2017_comp <- cbind(interp2017_tot_pop, interp2017_age, interp2017_male, interp2017_black, interp2017_white,
+                         interp2017_latino, interp2017_p_employed, interp2017_p_hsch_25, interp2017_p_hsch_16d,
+                         interp2017_p_inc, interp2017_value, interp2017_year_build, interp2017_vacant, interp2017_p_poverty) %>%
+  bind_cols(w_10min)
+
+interp2017_comp <- interp2017_comp %>%
+  select(name, geometry.1, tot_pop, 
+         p_male, md_age, p_white, p_black, p_latino, 
+         p_hsch_25, p_hsch_16d, p_employed, md_incm, p_poverty,
+         p_vcnt_h, md_yr_bld, md_value) %>%
+  rename(geometry = geometry.1)
+
+interp2017_comp$year <- 2017
+summary(interp2017_comp)
+```
+
+### 2018
+```{r}
+shape18 <- st_read("Covariates/tl_2018_36_tract.shp")
+shape18_v2 <- st_transform(shape18, CRS.new) # changes crs for .shp file
+st_crs(shape18_v2) # recheck to be sure transformation was successful
+
+shape18_v2_j <- left_join(shape18_v2, census_2018, by = "GEOID")
+
+shape18_v2_j <- left_join(shape18_v2, census_2018, by = "GEOID") %>%
+  mutate(md_age = if_else(md_age < 0, NA, md_age),
+         md_incm = if_else(md_incm < 0, NA, md_incm),
+         md_yr_bld = if_else(md_yr_bld <= 0, NA, md_yr_bld),
+         md_value = if_else(md_value < 0, NA, md_value))
+
+interp2018_tot_pop <- st_interpolate_aw(shape18_v2_j %>% select(tot_pop), w_10min,
+                                    extensive = TRUE, na.rm = TRUE)
+
+interp2018_age <- st_interpolate_aw(shape18_v2_j %>% select(md_age), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2018_male <- st_interpolate_aw(shape18_v2_j %>% select(p_male), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2018_black <- st_interpolate_aw(shape18_v2_j %>% select(p_black), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2018_white <- st_interpolate_aw(shape18_v2_j %>% select(p_white), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2018_latino <- st_interpolate_aw(shape18_v2_j %>% select(p_latino), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2018_p_employed <- st_interpolate_aw(shape18_v2_j %>% select(p_employed), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2018_p_hsch_25 <- st_interpolate_aw(shape18_v2_j %>% select(p_hsch_25), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2018_p_hsch_16d <- st_interpolate_aw(shape18_v2_j %>% select(p_hsch_16d), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2018_p_inc <- st_interpolate_aw(shape18_v2_j %>% select(md_incm), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2018_value <- st_interpolate_aw(shape18_v2_j %>% select(md_value), w_10min,
+                                    extensive = FALSE, na.rm = TRUE, keep_NA = TRUE)
+
+interp2018_year_build <- st_interpolate_aw(shape18_v2_j %>% select(md_yr_bld), w_10min,
+                                    extensive = FALSE, na.rm = TRUE, keep_NA = TRUE) 
+
+interp2018_vacant <- st_interpolate_aw(shape18_v2_j %>% select(p_vcnt_h), w_10min,
+                                    extensive = FALSE, na.rm = TRUE) 
+
+interp2018_p_poverty <- st_interpolate_aw(shape18_v2_j %>% select(p_poverty), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2018_comp <- cbind(interp2018_tot_pop, interp2018_age, interp2018_male, interp2018_black, interp2018_white,
+                         interp2018_latino, interp2018_p_employed, interp2018_p_hsch_25, interp2018_p_hsch_16d,
+                         interp2018_p_inc, interp2018_value, interp2018_year_build, interp2018_vacant, interp2018_p_poverty) %>%
+  bind_cols(w_10min)
+
+interp2018_comp <- interp2018_comp %>%
+  select(name, geometry.1, tot_pop, 
+         p_male, md_age, p_white, p_black, p_latino, 
+         p_hsch_25, p_hsch_16d, p_employed, md_incm, p_poverty,
+         p_vcnt_h, md_yr_bld, md_value) %>%
+  rename(geometry = geometry.1)
+
+interp2018_comp$year <- 2018
+summary(interp2018_comp)
+```
+
+### 2019
+```{r}
+shape19 <- st_read("Covariates/tl_2019_36_tract.shp")
+shape19_v2 <- st_transform(shape19, CRS.new) # changes crs for .shp file
+st_crs(shape19_v2) # recheck to be sure transformation was successful
+
+shape19_v2_j <- left_join(shape19_v2, census_2019, by = "GEOID")
+
+shape19_v2_j <- left_join(shape19_v2, census_2019, by = "GEOID") %>%
+  mutate(md_age = if_else(md_age < 0, NA, md_age),
+         md_incm = if_else(md_incm < 0, NA, md_incm),
+         md_yr_bld = if_else(md_yr_bld <= 0, NA, md_yr_bld),
+         md_value = if_else(md_value < 0, NA, md_value))
+
+interp2019_tot_pop <- st_interpolate_aw(shape19_v2_j %>% select(tot_pop), w_10min,
+                                    extensive = TRUE, na.rm = TRUE)
+
+interp2019_age <- st_interpolate_aw(shape19_v2_j %>% select(md_age), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2019_male <- st_interpolate_aw(shape19_v2_j %>% select(p_male), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2019_black <- st_interpolate_aw(shape19_v2_j %>% select(p_black), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2019_white <- st_interpolate_aw(shape19_v2_j %>% select(p_white), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2019_latino <- st_interpolate_aw(shape19_v2_j %>% select(p_latino), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2019_p_employed <- st_interpolate_aw(shape19_v2_j %>% select(p_employed), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2019_p_hsch_25 <- st_interpolate_aw(shape19_v2_j %>% select(p_hsch_25), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2019_p_hsch_16d <- st_interpolate_aw(shape19_v2_j %>% select(p_hsch_16d), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2019_p_inc <- st_interpolate_aw(shape19_v2_j %>% select(md_incm), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2019_value <- st_interpolate_aw(shape19_v2_j %>% select(md_value), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2019_year_build <- st_interpolate_aw(shape19_v2_j %>% select(md_yr_bld), w_10min,
+                                    extensive = FALSE, na.rm = TRUE, keep_NA = TRUE) 
+
+interp2019_vacant <- st_interpolate_aw(shape19_v2_j %>% select(p_vcnt_h), w_10min,
+                                    extensive = FALSE, na.rm = TRUE) 
+
+interp2019_p_poverty <- st_interpolate_aw(shape19_v2_j %>% select(p_poverty), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2019_comp <- cbind(interp2019_tot_pop, interp2019_age, interp2019_male, interp2019_black, interp2019_white,
+                         interp2019_latino, interp2019_p_employed, interp2019_p_hsch_25, interp2019_p_hsch_16d,
+                         interp2019_p_inc, interp2019_value, interp2019_year_build, interp2019_vacant, interp2019_p_poverty) %>%
+  bind_cols(w_10min)
+
+interp2019_comp <- interp2019_comp %>%
+  select(name, geometry.1, tot_pop, 
+         p_male, md_age, p_white, p_black, p_latino, 
+         p_hsch_25, p_hsch_16d, p_employed, md_incm, p_poverty,
+         p_vcnt_h, md_yr_bld, md_value) %>%
+  rename(geometry = geometry.1)
+
+interp2019_comp$year <- 2019
+summary(interp2019_comp)
+```
+
+### 2020
+```{r}
+shape20 <- st_read("Covariates/tl_2020_36_tract.shp")
+shape20_v2 <- st_transform(shape20, CRS.new) # changes crs for .shp file
+st_crs(shape20_v2) # recheck to be sure transformation was successful
+
+shape20_v2_j <- left_join(shape20_v2, census_2020, by = "GEOID")
+
+summary(shape20_v2_j)
+
+shape20_v2_j <- left_join(shape20_v2, census_2020, by = "GEOID") %>%
+  mutate(md_age = if_else(md_age < 0, NA, md_age),
+         md_incm = if_else(md_incm < 0, NA, md_incm),
+         md_yr_bld = if_else(md_yr_bld <= 0, NA, md_yr_bld),
+         md_value = if_else(md_value < 0, NA, md_value))
+
+interp2020_tot_pop <- st_interpolate_aw(shape20_v2_j %>% select(tot_pop), w_10min,
+                                    extensive = TRUE, na.rm = TRUE)
+
+interp2020_age <- st_interpolate_aw(shape20_v2_j %>% select(md_age), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2020_male <- st_interpolate_aw(shape20_v2_j %>% select(p_male), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2020_black <- st_interpolate_aw(shape20_v2_j %>% select(p_black), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2020_white <- st_interpolate_aw(shape20_v2_j %>% select(p_white), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2020_latino <- st_interpolate_aw(shape20_v2_j %>% select(p_latino), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2020_p_employed <- st_interpolate_aw(shape20_v2_j %>% select(p_employed), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2020_p_hsch_25 <- st_interpolate_aw(shape20_v2_j %>% select(p_hsch_25), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2020_p_hsch_16d <- st_interpolate_aw(shape20_v2_j %>% select(p_hsch_16d), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2020_p_inc <- st_interpolate_aw(shape20_v2_j %>% select(md_incm), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2020_value <- st_interpolate_aw(shape20_v2_j %>% select(md_value), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2020_year_build <- st_interpolate_aw(shape20_v2_j %>% select(md_yr_bld), w_10min,
+                                    extensive = FALSE, na.rm = TRUE, keep_NA = TRUE) 
+
+interp2020_vacant <- st_interpolate_aw(shape20_v2_j %>% select(p_vcnt_h), w_10min,
+                                    extensive = FALSE, na.rm = TRUE) 
+
+interp2020_p_poverty <- st_interpolate_aw(shape20_v2_j %>% select(p_poverty), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2020_comp <- cbind(interp2020_tot_pop, interp2020_age, interp2020_male, interp2020_black, interp2020_white,
+                         interp2020_latino, interp2020_p_employed, interp2020_p_hsch_25, interp2020_p_hsch_16d,
+                         interp2020_p_inc, interp2020_value, interp2020_year_build, interp2020_vacant, interp2020_p_poverty) %>%
+  bind_cols(w_10min)
+
+interp2020_comp <- interp2020_comp %>%
+  select(name, geometry.1, tot_pop, 
+         p_male, md_age, p_white, p_black, p_latino, 
+         p_hsch_25, p_hsch_16d, p_employed, md_incm, p_poverty,
+         p_vcnt_h, md_yr_bld, md_value) %>%
+  rename(geometry = geometry.1)
+
+interp2020_comp$year <- 2020
+summary(interp2020_comp)
+```
+
+### 2021
+```{r}
+shape21 <- st_read("Covariates/tl_2021_36_tract.shp")
+shape21_v2 <- st_transform(shape21, CRS.new) # changes crs for .shp file
+st_crs(shape21_v2) # recheck to be sure transformation was successful
+
+shape21_v2_j <- left_join(shape21_v2, census_2021, by = "GEOID")
+
+shape21_v2_j <- left_join(shape21_v2, census_2021, by = "GEOID") %>%
+  mutate(md_age = if_else(md_age < 0, NA, md_age),
+         md_incm = if_else(md_incm < 0, NA, md_incm),
+         md_yr_bld = if_else(md_yr_bld <= 0, NA, md_yr_bld),
+         md_value = if_else(md_value < 0, NA, md_value))
+
+interp2021_tot_pop <- st_interpolate_aw(shape21_v2_j %>% select(tot_pop), w_10min,
+                                    extensive = TRUE, na.rm = TRUE)
+
+interp2021_age <- st_interpolate_aw(shape21_v2_j %>% select(md_age), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2021_male <- st_interpolate_aw(shape21_v2_j %>% select(p_male), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2021_black <- st_interpolate_aw(shape21_v2_j %>% select(p_black), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2021_white <- st_interpolate_aw(shape21_v2_j %>% select(p_white), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2021_latino <- st_interpolate_aw(shape21_v2_j %>% select(p_latino), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2021_p_employed <- st_interpolate_aw(shape21_v2_j %>% select(p_employed), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2021_p_hsch_25 <- st_interpolate_aw(shape21_v2_j %>% select(p_hsch_25), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2021_p_hsch_16d <- st_interpolate_aw(shape21_v2_j %>% select(p_hsch_16d), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2021_p_inc <- st_interpolate_aw(shape21_v2_j %>% select(md_incm), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2021_value <- st_interpolate_aw(shape21_v2_j %>% select(md_value), w_10min,
+                                    extensive = FALSE, na.rm = TRUE, keep_NA = TRUE)
+
+interp2021_year_build <- st_interpolate_aw(shape21_v2_j %>% select(md_yr_bld), w_10min,
+                                    extensive = FALSE, na.rm = TRUE, keep_NA = TRUE) 
+
+interp2021_vacant <- st_interpolate_aw(shape21_v2_j %>% select(p_vcnt_h), w_10min,
+                                    extensive = FALSE, na.rm = TRUE) 
+
+interp2021_p_poverty <- st_interpolate_aw(shape21_v2_j %>% select(p_poverty), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2021_comp <- cbind(interp2021_tot_pop, interp2021_age, interp2021_male, interp2021_black, interp2021_white,
+                         interp2021_latino, interp2021_p_employed, interp2021_p_hsch_25, interp2021_p_hsch_16d,
+                         interp2021_p_inc, interp2021_value, interp2021_year_build, interp2021_vacant, interp2021_p_poverty) %>%
+  bind_cols(w_10min)
+
+interp2021_comp <- interp2021_comp %>%
+  select(name, geometry.1, tot_pop, 
+         p_male, md_age, p_white, p_black, p_latino, 
+         p_hsch_25, p_hsch_16d, p_employed, md_incm, p_poverty,
+         p_vcnt_h, md_yr_bld, md_value) %>%
+  rename(geometry = geometry.1)
+
+interp2021_comp$year <- 2021
+summary(interp2021_comp)
+```
+
+### 2022
+```{r}
+shape22 <- st_read("Covariates/tl_2022_36_tract.shp")
+shape22_v2 <- st_transform(shape22, CRS.new) # changes crs for .shp file
+st_crs(shape22_v2) # recheck to be sure transformation was successful
+
+shape22_v2_j <- left_join(shape22_v2, census_2022, by = "GEOID")
+
+shape22_v2_j <- left_join(shape22_v2, census_2022, by = "GEOID") %>%
+  mutate(md_age = if_else(md_age < 0, NA, md_age),
+         md_incm = if_else(md_incm < 0, NA, md_incm),
+         md_yr_bld = if_else(md_yr_bld <= 0, NA, md_yr_bld),
+         md_value = if_else(md_value < 0, NA, md_value))
+
+interp2022_tot_pop <- st_interpolate_aw(shape22_v2_j %>% select(tot_pop), w_10min,
+                                    extensive = TRUE, na.rm = TRUE)
+
+interp2022_age <- st_interpolate_aw(shape22_v2_j %>% select(md_age), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2022_male <- st_interpolate_aw(shape22_v2_j %>% select(p_male), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2022_black <- st_interpolate_aw(shape22_v2_j %>% select(p_black), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2022_white <- st_interpolate_aw(shape22_v2_j %>% select(p_white), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2022_latino <- st_interpolate_aw(shape22_v2_j %>% select(p_latino), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2022_p_employed <- st_interpolate_aw(shape22_v2_j %>% select(p_employed), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2022_p_hsch_25 <- st_interpolate_aw(shape22_v2_j %>% select(p_hsch_25), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2022_p_hsch_16d <- st_interpolate_aw(shape22_v2_j %>% select(p_hsch_16d), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2022_p_inc <- st_interpolate_aw(shape22_v2_j %>% select(md_incm), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2022_value <- st_interpolate_aw(shape22_v2_j %>% select(md_value), w_10min,
+                                    extensive = FALSE, na.rm = TRUE, keep_NA = TRUE)
+
+interp2022_year_build <- st_interpolate_aw(shape22_v2_j %>% select(md_yr_bld), w_10min,
+                                    extensive = FALSE, na.rm = TRUE, keep_NA = TRUE) 
+
+interp2022_vacant <- st_interpolate_aw(shape22_v2_j %>% select(p_vcnt_h), w_10min,
+                                    extensive = FALSE, na.rm = TRUE) 
+
+interp2022_p_poverty <- st_interpolate_aw(shape22_v2_j %>% select(p_poverty), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2022_comp <- cbind(interp2022_tot_pop, interp2022_age, interp2022_male, interp2022_black, interp2022_white,
+                         interp2022_latino, interp2022_p_employed, interp2022_p_hsch_25, interp2022_p_hsch_16d,
+                         interp2022_p_inc, interp2022_value, interp2022_year_build, interp2022_vacant, interp2022_p_poverty) %>%
+  bind_cols(w_10min)
+
+interp2022_comp <- interp2022_comp %>%
+  select(name, geometry.1, tot_pop, 
+         p_male, md_age, p_white, p_black, p_latino, 
+         p_hsch_25, p_hsch_16d, p_employed, md_incm, p_poverty,
+         p_vcnt_h, md_yr_bld, md_value) %>%
+  rename(geometry = geometry.1)
+
+interp2022_comp$year <- 2022
+summary(interp2022_comp)
+```
+
+
+### 2023
+```{r}
+shape23 <- st_read("Covariates/tl_2023_36_tract.shp")
+shape23_v2 <- st_transform(shape23, CRS.new) # changes crs for .shp file
+st_crs(shape23_v2) # recheck to be sure transformation was successful
+
+shape23_v2_j <- left_join(shape23_v2, census_2023, by = "GEOID")
+
+shape23_v2_j <- left_join(shape23_v2, census_2023, by = "GEOID") %>%
+  mutate(md_age = if_else(md_age < 0, NA, md_age),
+         md_incm = if_else(md_incm < 0, NA, md_incm),
+         md_yr_bld = if_else(md_yr_bld <= 0, NA, md_yr_bld),
+         md_value = if_else(md_value < 0, NA, md_value))
+
+interp2023_tot_pop <- st_interpolate_aw(shape23_v2_j %>% select(tot_pop), w_10min,
+                                    extensive = TRUE, na.rm = TRUE)
+
+interp2023_age <- st_interpolate_aw(shape23_v2_j %>% select(md_age), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2023_male <- st_interpolate_aw(shape23_v2_j %>% select(p_male), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2023_black <- st_interpolate_aw(shape23_v2_j %>% select(p_black), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2023_white <- st_interpolate_aw(shape23_v2_j %>% select(p_white), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2023_latino <- st_interpolate_aw(shape23_v2_j %>% select(p_latino), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2023_p_employed <- st_interpolate_aw(shape23_v2_j %>% select(p_employed), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2023_p_hsch_25 <- st_interpolate_aw(shape23_v2_j %>% select(p_hsch_25), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2023_p_hsch_16d <- st_interpolate_aw(shape23_v2_j %>% select(p_hsch_16d), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2023_p_inc <- st_interpolate_aw(shape23_v2_j %>% select(md_incm), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2023_value <- st_interpolate_aw(shape23_v2_j %>% select(md_value), w_10min,
+                                    extensive = FALSE, na.rm = TRUE, keep_NA = TRUE)
+
+interp2023_year_build <- st_interpolate_aw(shape23_v2_j %>% select(md_yr_bld), w_10min,
+                                    extensive = FALSE, na.rm = TRUE, keep_NA = TRUE) 
+
+interp2023_vacant <- st_interpolate_aw(shape23_v2_j %>% select(p_vcnt_h), w_10min,
+                                    extensive = FALSE, na.rm = TRUE) 
+
+interp2023_p_poverty <- st_interpolate_aw(shape23_v2_j %>% select(p_poverty), w_10min,
+                                    extensive = FALSE, na.rm = TRUE)
+
+interp2023_comp <- cbind(interp2023_tot_pop, interp2023_age, interp2023_male, interp2023_black, interp2023_white,
+                         interp2023_latino, interp2023_p_employed, interp2023_p_hsch_25, interp2023_p_hsch_16d,
+                         interp2023_p_inc, interp2023_value, interp2023_year_build, interp2023_vacant, interp2023_p_poverty) %>%
+  bind_cols(w_10min)
+
+interp2023_comp <- interp2023_comp %>%
+  select(name, geometry.1, tot_pop, 
+         p_male, md_age, p_white, p_black, p_latino, 
+         p_hsch_25, p_hsch_16d, p_employed, md_incm, p_poverty,
+         p_vcnt_h, md_yr_bld, md_value) %>%
+  rename(geometry = geometry.1)
+
+interp2023_comp$year <- 2023
+summary(interp2023_comp)
+```
+
+## Final dataset
+```{r}
+df_10min_covar <- rbind(interp2017_comp, interp2018_comp, interp2019_comp,
+                      interp2020_comp, interp2021_comp, interp2022_comp,
+                      interp2023_comp)
+
+summary(df_10min_covar)
+
+save(df_10min_covar, file = "df_10min_covar.RData")
+```

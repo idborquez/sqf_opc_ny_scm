@@ -1,0 +1,189 @@
+---
+title: "sqf_outcomes"
+author: "Ignacio Borquez Infante"
+date: "2025-01-09"
+output: html_document
+---
+
+# Packages
+```{r}
+# Remove all objects from the environment
+rm(list = ls())
+
+# Perform garbage collection to free up memory
+gc()
+
+require(readxl)
+require(lubridate)
+require(dplyr)
+```
+
+# Directory
+```{r}
+setwd("")
+```
+
+## Datasets
+
+### 2017
+```{r}
+df17 <- read_excel("sqf-2017.xlsx")
+
+colnames(df17) <- tolower(colnames(df17))
+
+df17 <- df17[df17$stop_location_precinct != 208760, ]
+
+df17$one <- 1
+
+df17$stop_frisk_date <- as.Date(df17$stop_frisk_date)
+
+sqf_17 <- df17 %>%
+  select(stop_frisk_id, stop_location_precinct, stop_frisk_date, one, stop_location_x, stop_location_y)
+
+save(sqf_17, file="sqf_17.RData")
+```
+
+### 2018
+```{r}
+df18 <- read_excel("sqf-2018.xlsx")
+
+colnames(df18) <- tolower(colnames(df18))
+
+df18$one <- 1
+
+df18$stop_frisk_date <- as.Date(df18$stop_frisk_date)
+
+sqf_18 <- df18 %>%
+  select(stop_frisk_id, stop_location_precinct, stop_frisk_date, one, stop_location_x, stop_location_y)
+
+save(sqf_18, file="sqf_18.RData")
+```
+
+### 2019
+```{r}
+df19 <- read_excel("sqf-2019.xlsx")
+
+colnames(df19) <- tolower(colnames(df19))
+
+df19$one <- 1
+
+df19$stop_frisk_date <- as.Date(df19$stop_frisk_date)
+
+df19 <- df19 %>%
+  rename(stop_frisk_id = stop_id_anony)
+
+sqf_19 <- df19 %>%
+  select(stop_frisk_id, stop_location_precinct, stop_frisk_date, one, stop_location_x, stop_location_y)
+
+save(sqf_19, file="sqf_19.RData")
+```
+
+### 2020
+```{r}
+df20 <- read_excel("sqf-2020.xlsx")
+
+colnames(df20) <- tolower(colnames(df20))
+
+df20$one <- 1
+
+df20 <- df20 %>%
+  rename(stop_frisk_id = stop_id)
+
+df20$stop_frisk_date <- as.Date(df20$stop_frisk_date)
+
+sqf_20 <- df20 %>%
+  select(stop_frisk_id, stop_location_precinct, stop_frisk_date, one, stop_location_x, stop_location_y)
+
+save(sqf_20, file="sqf_20.RData")
+```
+
+### 2021
+```{r}
+df21 <- read_excel("sqf-2021.xlsx")
+
+colnames(df21) <- tolower(colnames(df21))
+
+df21$one <- 1
+
+df21$stop_frisk_date <- as.Date(df21$stop_frisk_date)
+
+df21 <- df21 %>%
+  rename(stop_frisk_id = stop_id)
+
+sqf_21 <- df21 %>%
+  select(stop_frisk_id, stop_location_precinct, stop_frisk_date, one, stop_location_x, stop_location_y)
+
+save(sqf_21, file="sqf_21.RData")
+```
+
+### 2022
+```{r}
+df22 <- read_excel("sqf-2022.xlsx")
+
+colnames(df22) <- tolower(colnames(df22))
+
+df22$one <- 1
+
+df22 <- df22 %>%
+  rename(stop_frisk_id = stop_id)
+
+df22$stop_frisk_date <- as.Date(df22$stop_frisk_date)
+
+sqf_22 <- df22 %>%
+  select(stop_frisk_id, stop_location_precinct, stop_frisk_date, one, stop_location_x, stop_location_y)
+
+save(sqf_22, file="sqf_22.RData")
+```
+
+### 2023
+```{r}
+df23 <- read_excel("sqf-2023.xlsx")
+
+colnames(df23) <- tolower(colnames(df23))
+
+df23$one <- 1
+
+df23 <- df23 %>%
+  rename(stop_frisk_id = stop_id)
+
+df23$stop_frisk_date <- as.Date(df23$stop_frisk_date)
+
+sqf_23 <- df23 %>%
+  select(stop_frisk_id, stop_location_precinct, stop_frisk_date, one, stop_location_x, stop_location_y)
+
+save(sqf_23, file="sqf_23.RData")
+```
+
+### 2024
+```{r}
+df24 <- read_excel("sqf-2024.xlsx")
+
+colnames(df24) <- tolower(colnames(df24))
+
+df24$one <- 1
+
+df24 <- df24 %>%
+  rename(stop_frisk_id = stop_id)
+
+df24$stop_frisk_date <- as.Date(df24$stop_frisk_date)
+
+sqf_24 <- df24 %>%
+  select(stop_frisk_id, stop_location_precinct, stop_frisk_date, one, stop_location_x, stop_location_y)
+
+save(sqf_24, file="sqf_24.RData")
+```
+
+# Merge and filter
+```{r}
+df_sqf <- as.data.frame(rbind(sqf_17, sqf_18, sqf_19, sqf_20, sqf_21, sqf_22, sqf_23, sqf_24))
+
+df_sqf <- df_sqf %>%
+  filter(if_all(c(stop_location_x, stop_location_y), ~ !is.na(.) & . != "(null)"))
+
+df_sqf$stop_location_precinct <- as.numeric(df_sqf$stop_location_precinct)
+df_sqf$stop_location_x <- as.numeric(df_sqf$stop_location_x)
+df_sqf$stop_location_y <- as.numeric(df_sqf$stop_location_y)
+
+save(df_sqf, file = "df_sqf_17_24_test.RData")
+```
+

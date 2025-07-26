@@ -1,0 +1,1337 @@
+---
+title: "SQF_OPC_SC"
+author: "Ignacio Borquez Infante"
+date: "2024-08-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Packages
+```{r}
+# Remove all objects from the environment
+rm(list = ls())
+
+# Perform garbage collection to free up memory
+gc()
+
+#remotes::install_github("n-delaney/augsynth_permutation")
+#remotes::install_github("rstudio/ggcheck")
+#remotes::install_github("calebasaraba/augsynth_permutation")
+
+library(arsenal)
+library(lubridate)
+library(dplyr)
+library(tidyr)
+library(arsenal)
+library(leaflet)
+library(readr)
+library(sf)
+library(tidyverse)
+library(augsynth)
+library(ggcheck)
+library(patchwork)
+library(DT)
+library(gt)
+```
+
+# Directory
+```{r}
+#setwd("")
+```
+
+# Load data
+```{r}
+load("df_sqf_17_24.RData") # Outcomes
+load("df_5min_covar.RData") # ACS covariates five-minute walking buffers
+load("df_10min_covar.RData") # ACS covariates ten-minute walking buffers
+load("foot_5min_montly.RData") # Foot traffic five-minute walking buffers
+load("foot_10min_montly.RData") # Foot traffic ten-minute walking buffers
+gentri <- read_rds("ignacio_gentrification_walk.rds") # Gentrification
+
+gentri_5min <- gentri %>%
+  select(-c(gent_10)) %>%
+  rename(gent = gent_5)
+
+gentri_10min <- gentri %>%
+  select(-c(gent_5)) %>%
+  rename(gent = gent_10)
+```
+
+# Functions
+```{r}
+# Balance table
+create_balance_table <- function(fit_obj_adj, fit_obj_unadj, treatment_name, var_name){
+  weight_df <- donor_table(fit_obj_adj) %>%
+    select({{var_name}}, weight)
+  donor_info <- fit_obj_adj$raw_data %>%
+    filter({{var_name}} != treatment_name) %>%
+    filter(biweekly_marker < 0) %>%
+    left_join(weight_df, by = "name") %>%
+    summarize(across(tot_pop:gent, function(a) weighted.mean(a, weight, na.rm = T),
+                     .names = "{.col}"))
+
+  treat_info <- fit_obj_adj$raw_data %>%
+    filter({{var_name}} == treatment_name) %>%
+    filter(biweekly_marker < 0) %>%
+    summarize(across(tot_pop:gent, function(a) mean(a, na.rm = T),
+                     .names = "{.col}"))
+
+  donor_raw <- fit_obj_adj$raw_data %>%
+    filter({{var_name}} != treatment_name) %>%
+    filter(biweekly_marker < 0) %>%
+    left_join(weight_df, by = "name") %>%
+    summarize(across(tot_pop:gent, function(a) mean(a, na.rm = T),
+                     .names = "{.col}"))
+
+  weight_unadj <- donor_table(fit_obj_unadj) %>%
+    select({{var_name}}, weight)
+ 
+  donor_unadj <- fit_obj_adj$raw_data %>%
+    filter({{var_name}} != treatment_name) %>%
+    filter(biweekly_marker < 0) %>%
+    left_join(weight_unadj, by = "name") %>%
+    summarize(across(tot_pop:gent, function(a) weighted.mean(a, weight, na.rm = T)))
+
+  combined_tbl <- bind_rows(treat_info, donor_unadj, donor_info, donor_raw) %>%
+
+    mutate(group = c("Treatment", "Synthetic Controls (No Covariates)", 
+                     "Synthetic Controls (Covariates)", "All Donor Units")) %>%
+    pivot_longer(cols = tot_pop:gent,
+                 values_to = "value",
+                 names_to = "Variable") %>%
+    mutate(value = round(value, 3)) %>%
+    mutate(group = factor(group, levels = c("All Donor Units",
+                                            "Treatment",
+                                            "Synthetic Controls (No Covariates)",
+                                            "Synthetic Controls (Covariates)"))) %>%
+    arrange(group) %>%
+    pivot_wider(id_cols = "Variable",
+                names_from = "group",
+                values_from = "value") %>%
+    mutate(Measure = case_when(
+      Variable == "tot_pop" ~ "Total population",
+      Variable == "md_age" ~ "Median Age",
+      Variable == "p_male" ~ "Proportion Male",
+      Variable == "p_black" ~ "Proportion Black",
+      Variable == "p_white" ~ "Proportion White",
+      Variable == "p_latino" ~ "Proportion Hispanic",
+      Variable == "p_employed" ~ "Proportion Employed",
+      Variable == "p_hsch_25" ~ "Proportion over 25 Less High School Diploma",
+      Variable == "p_hsch_16d" ~ "Proportion between 16 and 25 Less High School",
+      Variable == "md_incm" ~ "Median Income",
+      Variable == "p_poverty" ~ "Proportion below poverty pas 12 months",
+      Variable == "md_value" ~ "Median value of properties",
+      Variable == "md_yr_bld" ~ "Median year of the building",
+      Variable == "p_vcnt_h" ~ "Proportion vacant household",
+      Variable == "median_visits" ~ "Median visits",
+      Variable == "gent" ~ "Gentrification",
+      TRUE ~ "XXX")) %>%
+    mutate(Measure = factor(Measure, levels = c("Total population",
+                                                "Median Age",
+                                                "Proportion Male",
+                                                "Proportion Black",
+                                                "Proportion White",
+                                                "Proportion Hispanic",
+                                                "Proportion Employed",
+                                                "Proportion over 25 Less High School Diploma",
+                                                "Proportion between 16 and 25 Less High School",
+                                                "Median Income",
+                                                "Proportion below poverty pas 12 months",
+                                                "Median value of properties",
+                                                "Median year of the building",
+                                                "Proportion vacant household",
+                                                "Median visits",
+                                                "Gentrification"))) %>%
+    arrange(Measure) %>%
+    select(-Variable) %>%
+    select(Measure, everything())
+  
+  tbl_object <- combined_tbl %>%
+    gt() %>%
+    tab_header(title = str_c(treatment_name, " Covariate Balance Table"),
+               subtitle = str_c("Pre-Period: 01/01/2017 - 11/30/2021")) %>%
+    tab_options(
+      heading.align = "left",
+      column_labels.font.weight = "bold",
+      table_body.vlines.style = "solid",
+      table_body.vlines.color = "grey"
+    ) %>%
+    tab_style(
+      style = list(
+        cell_text(
+          align = "left",
+          weight = "bold")),
+      locations = list(
+        cells_title(groups = c("title"))
+      )
+    ) %>%
+    opt_row_striping()
+
+  return(tbl_object)
+}
+
+# Get att
+get_att <- function(fit_obj){
+  summary(fit_obj, inf_type = "permutation")$att %>%
+    drop_na(p_val) %>%
+    pull(Estimate) %>%
+    sum() %>%
+    round(3)
+
+}
+
+# Get average att
+get_avg_att <- function(fit_obj){
+  summary(fit_obj, inf_type = "permutation")$att %>%
+    drop_na(p_val) %>%
+    pull(Estimate) %>%
+    mean() %>%
+    round(3)
+
+}
+
+# SCM plot
+make_observed_plot <- function(fit_obj, trx_time, title, time_period){
+  conform_obj <- summary(fit_obj, inf_type = "conformal")
+
+  outcome_dat <- plot(conform_obj, plot_type = "outcomes raw average") %>%
+    get_data() %>%
+    select(time, Yobs, Yhat, raw_average) %>%
+    pivot_longer(cols = Yobs:raw_average,
+                 names_to = "group",
+                 values_to = "val") %>%
+    mutate(group = case_when(group == "Yobs" ~ "Treated",
+                             group == "Yhat" ~ "Synthetic",
+                             group == "raw_average" ~ "All Donors") %>%
+             factor(levels = c("Treated", "Synthetic", "All Donors")))
+
+  outcome_plot <- ggplot(data = outcome_dat) +
+    geom_line(aes(x = time, y = val, group = group, color = group,
+                  linetype = group), size = 1) +
+    theme_bw() +
+    scale_color_manual(values = c("Treated" = "lightpink1",
+                                  "Synthetic" = "gold2",
+                                  "All Donors" = "black")) +
+    scale_linetype_manual(values = c("Treated" = "solid",
+                                     "Synthetic" = "twodash",
+                                     "All Donors" = "dotted")) +
+    geom_vline(xintercept = trx_time, linetype = "dashed") +
+    labs(x = "Months Since OPC Opening", y = "Pedestrian stops", color = "", linetype = "",
+         title = "") +
+    theme(panel.grid.minor.x = element_blank(),
+          panel.grid.major.x = element_blank()) +
+  scale_x_continuous(breaks = c(seq(from = -6, to = -59, by = -6), seq(from = 0, to = 36, by = 6))) +
+    guides(color = guide_legend(override.aes = list(linetype = c("solid", "twodash", "dotted"))))
+
+  return(outcome_plot)
+}
+
+# Weights graph
+make_weight_graph <- function(fit_obj, name_var){
+  weight_df <- donor_table(fit_obj) %>%
+    select({{name_var}}, weight)
+ 
+  weight_graph_df <- weight_df %>%
+    filter(weight > 0.01 | weight < -0.01) %>%
+    mutate({{name_var}} := fct_reorder({{name_var}}, weight)) %>%
+    mutate(valence = case_when(weight > 0 ~ "Positive",
+                               weight < 0 ~ "Negative"))
+ 
+  ggplot(data = weight_graph_df) +
+    geom_bar(aes(y = {{name_var}}, x = weight, fill = valence), color = "white", stat = "identity") +
+    geom_text(aes(y = {{name_var}}, x = if_else(weight < 0, weight - 0.1, weight + 0.1), label = round(weight, 2)), size = 3) +
+    theme_minimal() +
+    scale_x_continuous(limits = c(-1,1)) +
+    scale_fill_manual(values = c("Positive" = "lightblue",
+                                 "Negative" = "pink")) +
+    theme(legend.position = "none",
+          axis.text.y = element_text(size = 3)) +
+    labs(x = "Weight", y = "", title = "Synthetic Control Weights")
+
+}
+
+# Conformal inference graph
+make_conformal_ci_graph <- function(fit_obj){
+  conform_obj <- summary(fit_obj, inf_type = "conformal")
+
+  conform_estimates <- conform_obj$att %>%
+    drop_na(p_val) %>%
+    mutate(sig = case_when(Estimate > 0 & lower_bound > 0 ~ "Sig",
+                           Estimate < 0 & upper_bound < 0 ~ "Sig",
+                           TRUE ~ "Not"))
+
+  ggplot(data = conform_estimates) +
+    geom_pointrange(aes(x = Time, y = Estimate,
+                        ymin = lower_bound, ymax = upper_bound, color = sig)) +
+    theme_bw() +
+    scale_y_continuous(limits = c(min(conform_estimates$lower_bound) - 0.1, max(conform_estimates$upper_bound) + 0.1)) +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    labs(x = "", y = "ATT Estimate", title = "ATT Estimates", subtitle = "Conformal Inference; 95% CIs") +
+    scale_color_manual(values = c("Sig" = "black", "Not" = "darkgrey")) +
+    theme(legend.position = "none") +
+    scale_x_continuous(breaks = c(seq(from = 0, to = 36, by = 1)))  
+}
+
+# Permutation tests
+## Assign treatment
+assign_treatment <- function(data, unit_name){
+  out_df <- data %>%
+    mutate(treated = 0) %>%
+    mutate(treated = case_when(biweekly_marker >= 0 & name == unit_name ~ 1,
+                               TRUE ~ 0))
+  return(out_df)
+
+}
+
+## Create permutation
+create_permutation <- function(original_dat, unit_name, spatial_dat, buffer_size, custom_form,
+                               progfunc_opt, residualize_opt, overlap = TRUE){
+  new_dat <- assign_treatment(original_dat, unit_name)
+  if(overlap == TRUE){
+    new_overlaps <- check_for_overlaps(spatial_dat, unit_name, buffer_size)
+  } else {new_overlaps <- NULL}
+  permute_results <- run_augsynth(new_dat, new_overlaps,
+                                  custom_form,
+                                  progfunc_opt,
+                                  residualize_opt)
+
+  return(permute_results)
+
+}
+
+## Spatial overlap
+check_for_overlaps <- function(spatial_dat, unit_name, buffer_size){
+  buffers <- spatial_dat %>%
+    st_transform(crs = "EPSG:32118") %>%
+    st_buffer(buffer_size)
+  site_only <- buffers %>%
+    filter(name == unit_name) %>%
+    mutate(target_site = 1)
+  overlaps <- st_join(buffers, site_only) %>%
+    drop_na(target_site) %>%
+    filter(name.x != unit_name) %>%
+    mutate(name_to_remove = name.x)
+
+  return(overlaps)
+
+}
+
+## Run ASCM
+run_augsynth <- function(dataset, overlaps, formula, progfunc_opt, residualize_opt){
+  df <- dataset %>%
+    filter(name %in% overlaps$name_to_remove == FALSE)
+  
+  res <- single_augsynth(form = as.formula(formula),
+                  unit = name,
+                  time = biweekly_marker,
+                  data = df,
+                  scm = T, 
+                  t_int = 0, 
+                  progfunc = progfunc_opt,
+                  residualize = residualize_opt)
+  
+  graph_data <- plot(res) %>%
+    get_data()
+  
+  att_out <- summary(res)$att %>%
+    drop_na(p_val) %>%
+    pull(Estimate) %>%
+    sum()
+
+ avg_att_out <-summary(res)$att %>%
+    drop_na(p_val) %>%
+    pull(Estimate) %>%
+    mean() 
+ 
+  rmse_out <- graph_data %>%
+    mutate(timepoint = case_when(Time >= 0 ~ "Post",
+                                 Time < 0 ~ "Pre")) %>%
+    group_by(timepoint) %>%
+    summarize(RMSPE = sqrt(sum((Estimate)^2)/n())) %>%
+    pivot_wider(names_from = timepoint,
+                values_from = RMSPE) %>%
+    mutate(ratio = Post/Pre) %>%
+    mutate(graph_dat = list(graph_data)) %>%
+    mutate(att = att_out,
+           avg_att = avg_att_out)
+  
+  return(rmse_out)
+} 
+
+## Calculate permutations p value
+calculate_p <- function(df, obs_stat){
+  p_val <- df %>%
+    mutate(as_extreme = case_when(ratio >= obs_stat ~ 1,
+                                  TRUE ~ 0)) %>%
+    group_by(as_extreme) %>%
+    summarize(n = n()) %>%
+    mutate(per = n/sum(n)) %>%
+    filter(as_extreme == 1) %>%
+    pull(per)
+
+  return(p_val)
+
+}
+
+## Get permutatitons results
+get_permutation_results <- function(fit_obj, rel_form, spatial_data, buffer_size,
+                                    progfunc_opt, residualize_opt){
+
+  treated_unit <- fit_obj$raw_data %>%
+    filter(treated == 1) %>%
+    pull(name) %>%
+    unique()
+
+  standard_res <- create_permutation(fit_obj$raw_data, treated_unit, spatial_data, buffer_size, rel_form,
+                                     progfunc_opt, residualize_opt) %>%
+    mutate(unit = treated_unit) %>%
+    mutate(treatment = 1)
+
+  permutation_subjects <- fit_obj$raw_data %>%
+    filter(name != treated_unit) %>%
+    pull(name) %>%
+    unique()
+
+
+  permutation_out <- map_dfr(permutation_subjects, function(a){
+    create_permutation(fit_obj$raw_data, a, spatial_data, buffer_size, rel_form,
+                       progfunc_opt, residualize_opt) %>%
+      mutate(unit = a)
+  }) %>%
+    bind_rows(standard_res)
+
+  perm_results <- permutation_out %>%
+    mutate(p_val = map_dbl(ratio, function(a) calculate_p(permutation_out, a))) %>%
+    ungroup() %>%
+    mutate(sig_status = case_when(p_val < 0.05 ~ "Significant",
+                                  p_val >= 0.05 ~ "Not Significant") %>%
+             factor(levels = c("Significant", "Not Significant")))
+
+}
+
+## Permutations plot
+ make_perm_plot <- function(perm_res){
+  treatment_p <- perm_res %>%
+    filter(treatment == 1) %>%
+    pull(p_val) %>%
+    round(4)
+
+  plot_dat <- perm_res %>%
+    select(unit, graph_dat, treatment) %>%
+    group_by(unit) %>%
+    unnest(cols = c(graph_dat))
+
+  treatment_plot <- plot_dat %>%
+    filter(treatment == 1)
+
+  time_range <- range(treatment_plot$Time)
+ 
+  perm_plot <- ggplot(data = plot_dat) +
+    geom_line(aes(x = Time, y = Estimate, group = unit, color = "Placebo"), size = 0.6) +
+    geom_line(data = treatment_plot,
+              aes(x = Time, y = Estimate, color = "Treatment"), size = 1.1) +
+    theme_bw() +
+    scale_x_continuous(breaks = c(seq(from = -6, to = -59, by = -6), seq(from = 0, to = 36, by = 6))) + 
+    geom_vline(xintercept = 0, linetype = "dashed") +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    scale_color_manual(values = c("Placebo" = "grey50", "Treatment" = "black")) +
+    labs(x = "Months Since OPC Opening", color = "", size = "", alpha = "", title = "Placebo/Permutation Testing", y = "ATT",
+         subtitle = str_c("(p=", treatment_p, ")")) +
+    theme(panel.grid.minor.x = element_blank(),
+          panel.grid.major.x = element_blank(),
+          plot.subtitle = element_text(hjust = 1))
+
+  return(perm_plot)
+
+}
+
+```
+
+# Buffers
+# Create spatial object for SQF
+```{r}
+sqf_spatial <- df_sqf %>%
+  filter(stop_location_x > 0) %>%
+  st_as_sf(coords = c("stop_location_x", "stop_location_y"), crs = "EPSG:2263") %>%
+  mutate(date_cl = ymd(stop_frisk_date)) %>%
+  mutate(month = month(date_cl),
+         year = year(date_cl),
+         my = str_c(month, "-", year) %>% my())
+
+w_5min <- read_rds("highres5min.rds")
+w_10min <- read_rds("highres10min.rds")
+
+sqf_spatial_t <- st_transform(sqf_spatial, crs = "EPSG:32118")
+
+w_5min <- st_transform(w_5min, crs = "EPSG:32118")
+w_10min <- st_transform(w_10min, crs = "EPSG:32118")
+
+sqf_spatial_5min <- st_join(sqf_spatial_t, w_5min) %>%
+  drop_na(name)
+
+sqf_spatial_10min <- st_join(sqf_spatial_t, w_10min) %>%
+  drop_na(name)
+```
+
+# Create monthly counts and year variable
+```{r}
+# 5min
+sqf_monthly_5min <- sqf_spatial_5min %>%
+  st_drop_geometry() %>%
+  ungroup() %>%
+  group_by(name, my) %>%
+  summarize(
+    total_stops = n()) %>%
+  mutate(biweekly_marker = interval(my("12-21"), my) %/% months(1))
+
+all_combos_5min <- expand_grid(biweekly_marker = unique(sqf_monthly_5min$biweekly_marker),
+                          name = unique(sqf_monthly_5min$name))
+
+sqf_monthly_5min$year <- year(sqf_monthly_5min$my)
+
+# 10min
+sqf_monthly_10min <- sqf_spatial_10min %>%
+  st_drop_geometry() %>%
+  ungroup() %>%
+  group_by(name, my) %>%
+  summarize(
+    total_stops = n()) %>%
+  mutate(biweekly_marker = interval(my("12-21"), my) %/% months(1))
+
+all_combos_10min <- expand_grid(biweekly_marker = unique(sqf_monthly_10min$biweekly_marker),
+                          name = unique(sqf_monthly_10min$name))
+
+sqf_monthly_10min$year <- year(sqf_monthly_10min$my)
+```
+
+# Figure 1
+```{r eval=FALSE}
+opcs_5min <- w_5min %>%
+  filter(name %in% c("OnPoint East Harlem",
+                     "OnPoint Washington Heights"))
+
+eh_site_5min <- opcs_5min %>%
+  filter(name == "OnPoint East Harlem")
+
+wh_site_5min <- opcs_5min %>%
+  filter(name == "OnPoint Washington Heights")
+
+opcs_10min <- w_10min %>%
+  filter(name %in% c("OnPoint East Harlem",
+                     "OnPoint Washington Heights"))
+
+eh_site_10min <- opcs_10min %>%
+  filter(name == "OnPoint East Harlem")
+
+wh_site_10min <- opcs_10min %>%
+  filter(name == "OnPoint Washington Heights")
+
+wh_site_5min <- st_transform(wh_site_5min, crs = 4326)
+wh_site_10min <- st_transform(wh_site_10min, crs = 4326)
+eh_site_5min <- st_transform(eh_site_5min, crs = 4326)
+eh_site_10min <- st_transform(eh_site_10min, crs = 4326)
+
+leaflet() %>%
+  addProviderTiles("Esri.WorldTopoMap") %>%
+  addPolygons(data = wh_site_5min,
+              fillOpacity = 0.6,
+              color = "indianred", 
+              fillColor = "indianred") %>%
+  addPolygons(data = wh_site_10min,
+              fillOpacity = 0.2,
+              color = "yellow", 
+              fillColor = "yellow")
+
+leaflet() %>%
+  addProviderTiles("Esri.WorldTopoMap") %>%
+  addPolygons(data = eh_site_5min,
+              fillOpacity = 0.6,
+              color = "indianred", 
+              fillColor = "indianred") %>%
+  addPolygons(data = eh_site_10min,
+              fillOpacity = 0.2,
+              color = "yellow", 
+              fillColor = "yellow")
+```
+
+
+# Outcomes
+# WH dataset
+```{r}
+wh_dataset_5min <- sqf_monthly_5min %>%
+  full_join(all_combos_5min, by = c("name", "biweekly_marker")) %>%
+  mutate(total_stops = if_else(is.na(total_stops), 0, total_stops),
+         treated = case_when(name %in% "OnPoint Washington Heights" & biweekly_marker >= 0 ~ 1,
+                             TRUE ~ 0)) %>%
+  filter(name %in% "OnPoint East Harlem" == FALSE) %>%
+  ungroup()
+
+wh_dataset_5min$year[wh_dataset_5min$biweekly_marker < -47] <- 2017
+wh_dataset_5min$year[wh_dataset_5min$biweekly_marker >= -47 & wh_dataset_5min$biweekly_marker< -35] <- 2018
+wh_dataset_5min$year[wh_dataset_5min$biweekly_marker >= -35 & wh_dataset_5min$biweekly_marker< -23] <- 2019
+wh_dataset_5min$year[wh_dataset_5min$biweekly_marker >= -23 & wh_dataset_5min$biweekly_marker< -11] <- 2020
+wh_dataset_5min$year[wh_dataset_5min$biweekly_marker >= -11 & wh_dataset_5min$biweekly_marker< 1] <- 2021
+wh_dataset_5min$year[wh_dataset_5min$biweekly_marker >= 1 & wh_dataset_5min$biweekly_marker< 13] <- 2022
+wh_dataset_5min$year[wh_dataset_5min$biweekly_marker >= 13 & wh_dataset_5min$biweekly_marker< 25] <- 2023
+wh_dataset_5min$year[wh_dataset_5min$biweekly_marker >= 25] <- 2024
+
+wh_dataset_10min <- sqf_monthly_10min %>%
+  full_join(all_combos_10min, by = c("name", "biweekly_marker")) %>%
+  mutate(total_stops = if_else(is.na(total_stops), 0, total_stops),
+         treated = case_when(name %in% "OnPoint Washington Heights" & biweekly_marker >= 0 ~ 1,
+                             TRUE ~ 0)) %>%
+  filter(name %in% "OnPoint East Harlem" == FALSE) %>%
+  ungroup()
+
+```
+
+
+# Merge with covariates
+```{r}
+wh_dataset_5min <- merge(wh_dataset_5min, df_5min_covar, by=c("name", "year"), all.x = T)
+wh_dataset_10min <- merge(wh_dataset_10min, df_10min_covar, by=c("name", "year"), all.x = T)
+
+wh_dataset_5min <- merge(wh_dataset_5min, foot_5min_montly, by=c("name", "biweekly_marker"), all.x = T)
+wh_dataset_10min <- merge(wh_dataset_10min, foot_10min_montly, by=c("name", "biweekly_marker"), all.x = T)
+
+wh_dataset_5min <- wh_dataset_5min %>%
+  select(-my.y)
+
+wh_dataset_10min <- wh_dataset_10min %>%
+  select(-my.y)
+
+year_biweekly_lu <- wh_dataset_5min %>%
+  select(new_year = year, biweekly_marker) %>%
+  distinct() %>%
+  drop_na()
+
+wh_dataset_5min <- wh_dataset_5min %>%
+  left_join(year_biweekly_lu, by = "biweekly_marker") %>%
+  left_join(gentri_5min, by = c("name", c("new_year" = "year")))
+  
+wh_dataset_10min <- wh_dataset_10min %>%
+  left_join(year_biweekly_lu, by = "biweekly_marker") %>%
+  left_join(gentri_10min, by = c("name", c("new_year" = "year")))
+```
+
+### Median
+```{r eval=FALSE}
+wh_dataset_5min <- wh_dataset_5min %>%
+  mutate(
+    wh = case_when(name == "OnPoint Washington Heights" ~ 1,
+                   TRUE ~ 0),
+    pre = case_when(biweekly_marker < 0 ~ 1,
+                    TRUE ~ 0),
+    post = case_when(biweekly_marker >= 0 ~ 1,
+                     TRUE ~ 0))
+median_5min <- tableby(post ~ wt(total_stops),  # Disruptive events and For-profit crimes                       
+                  data = wh_dataset_5min, numeric.stats=c("median", "q1q3", "Nmiss", "N"), strata = wh,
+                  digits=3, digits.p=3, digits.pct=3)
+
+wh_dataset_10min <- wh_dataset_10min %>%
+  mutate(
+    wh = case_when(name == "OnPoint Washington Heights" ~ 1,
+                   TRUE ~ 0),
+    pre = case_when(biweekly_marker < 0 ~ 1,
+                    TRUE ~ 0),
+    post = case_when(biweekly_marker >= 0 ~ 1,
+                     TRUE ~ 0))
+median_10min <- tableby(post ~ wt(total_stops),  # Disruptive events and For-profit crimes                       
+                  data = wh_dataset_10min, numeric.stats=c("median", "q1q3", "Nmiss", "N"), strata = wh,
+                  digits=3, digits.p=3, digits.pct=3)
+```
+
+
+# WH SC - counts 5min unadjusted
+```{r}
+load("wh_perm_5min.Rda")  # Load permutation test
+
+form <- "total_stops ~ treated"    # Model
+
+wh_stop_scm_5min <- augsynth(form = as.formula(form), 
+                        unit = name,
+                        time = biweekly_marker,
+                        data = wh_dataset_5min,
+                        residualize = T)
+
+# Graph
+a1 <- make_observed_plot(wh_stop_scm_5min, 0,"Washington Heights: NYPD monthly pedestrian stops counts 300 meters buffer", -59:36) 
+
+# ATT
+att_wh5min <- get_avg_att(wh_stop_scm_5min)
+
+# RMSPE
+graph_data <- plot(wh_stop_scm_5min) %>%
+    get_data()
+
+rmse_out <- graph_data %>%
+    mutate(timepoint = case_when(Time >= 0 ~ "Post",
+                                 Time < 0 ~ "Pre")) %>%
+    group_by(timepoint) %>%
+    summarize(RMSPE = sqrt(sum((Estimate)^2)/n())) %>%
+    pivot_wider(names_from = timepoint,
+                values_from = RMSPE) %>%
+    mutate(ratio = Post/Pre) %>%
+    mutate(graph_dat = list(graph_data))
+
+rmse_wh5min <- rmse_out$Pre
+```
+
+## Permutations tests
+```{r eval=FALSE}
+wh_perm_5min <- get_permutation_results(wh_stop_scm_5min,
+                                       form,
+                                       w_5min,
+                                       0,
+                                       "ridge",
+                                       T)
+
+save(wh_perm_5min, file = "wh_perm_5min.Rda")
+```
+
+### Table
+```{r}
+datatable(wh_perm_5min)
+```
+
+# WH SC - counts 5min adjusted
+```{r}
+load("wh_perm_5min_ad.Rda")
+
+form <- "total_stops ~ treated | tot_pop + md_age + p_male + p_black + p_white + p_latino + p_employed + p_hsch_16d + p_poverty + md_value + md_yr_bld + p_vcnt_h + median_visits + gent"
+
+wh_stop_scm_5min_ad <- augsynth(form = as.formula(form), 
+                        unit = name,
+                        time = biweekly_marker,
+                        data = wh_dataset_5min,
+                        residualize = T)
+
+# Graph
+a <- make_observed_plot(wh_stop_scm_5min_ad, 0,"Washington Heights: NYPD monthly pedestrian stops counts 300 meters buffer", -59:36)  
+
+# Permutation graph
+z <- make_perm_plot(wh_perm_5min_ad)
+
+# ATT
+att_wh5min_ad <- get_avg_att(wh_stop_scm_5min_ad)
+
+# RMSPE
+graph_data <- plot(wh_stop_scm_5min_ad) %>%
+    get_data()
+
+rmse_out <- graph_data %>%
+    mutate(timepoint = case_when(Time >= 0 ~ "Post",
+                                 Time < 0 ~ "Pre")) %>%
+    group_by(timepoint) %>%
+    summarize(RMSPE = sqrt(sum((Estimate)^2)/n())) %>%
+    pivot_wider(names_from = timepoint,
+                values_from = RMSPE) %>%
+    mutate(ratio = Post/Pre) %>%
+    mutate(graph_dat = list(graph_data))
+
+rmse_wh5min_ad <- rmse_out$Pre
+```
+
+## Permutations tests
+```{r eval=FALSE}
+wh_perm_5min_ad <- get_permutation_results(wh_stop_scm_5min_ad,
+                                       form,
+                                       w_5min,
+                                       0,
+                                       "ridge",
+                                       T)
+
+save(wh_perm_5min_ad, file = "wh_perm_5min_ad.Rda")
+```
+
+### Table + graph
+```{r}
+datatable(wh_perm_5min_ad)
+
+# Graph
+wh_perm_5min_ad <- wh_perm_5min_ad %>%
+  mutate(
+    treatment_label = case_when(
+      treatment == 1 ~ "Treatment",
+      is.na(treatment) ~ "Donor",
+      TRUE ~ "Control"
+    )
+  )
+
+ggplot(wh_perm_5min_ad, aes(x = ratio, fill = treatment_label)) +
+  geom_histogram(bins = 57, position = "identity", alpha = 0.6, color = "black") +
+  scale_fill_manual(
+    values = c("Donor" = "gray", "Treatment" = "red"),
+    name = "Group"
+  ) +
+  scale_x_continuous(
+    breaks = scales::pretty_breaks(n = 20),
+    name = "Permutation tests effects"
+  ) +
+  labs(y = "Count") +
+  theme_minimal(base_size = 13) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    legend.position = "top"
+  )
+```
+
+## Balance Table 5-min WH
+```{r}
+create_balance_table(wh_stop_scm_5min_ad,wh_stop_scm_5min,treatment_name = "OnPoint Washington Heights", var_name = name)
+```
+
+
+# WH SC - counts 10 min unadjusted
+```{r}
+load("wh_perm_10min.Rda")
+
+form <- "total_stops ~ treated"
+
+wh_stop_scm_10min <- augsynth(form = as.formula(form), 
+                        unit = name,
+                        time = biweekly_marker,
+                        data = wh_dataset_10min,
+                        residualize = T)
+
+# Graph
+b1 <- make_observed_plot(wh_stop_scm_10min, 0,"Washington Heights: NYPD monthly pedestrian stops counts 500 meters buffer", -59:36) 
+
+# ATT
+att_wh10min <- get_avg_att(wh_stop_scm_10min)
+
+# RMSPE
+graph_data <- plot(wh_stop_scm_10min) %>%
+    get_data()
+
+rmse_out <- graph_data %>%
+    mutate(timepoint = case_when(Time >= 0 ~ "Post",
+                                 Time < 0 ~ "Pre")) %>%
+    group_by(timepoint) %>%
+    summarize(RMSPE = sqrt(sum((Estimate)^2)/n())) %>%
+    pivot_wider(names_from = timepoint,
+                values_from = RMSPE) %>%
+    mutate(ratio = Post/Pre) %>%
+    mutate(graph_dat = list(graph_data))
+
+rmse_wh10min <- rmse_out$Pre
+```
+
+## Permutations tests
+```{r eval=FALSE}
+wh_perm_10min <- get_permutation_results(wh_stop_scm_10min,
+                                       form,
+                                       w_10min,
+                                       0,
+                                       "ridge",
+                                       T)
+
+save(wh_perm_10min, file = "wh_perm_10min.Rda")
+```
+
+### Table
+```{r}
+datatable(wh_perm_10min)
+```
+
+# WH SC - counts 10min adjusted
+```{r}
+load("wh_perm_10min_ad.Rda")
+
+form <- "total_stops ~ treated | tot_pop + md_age + p_male + p_black + p_white + p_latino + p_employed + p_hsch_16d + p_poverty + md_value + md_yr_bld + p_vcnt_h + median_visits + gent"
+
+wh_stop_scm_10min_ad <- augsynth(form = as.formula(form), 
+                        unit = name,
+                        time = biweekly_marker,
+                        data = wh_dataset_10min,
+                        residualize = T)
+
+# Graph
+b <- make_observed_plot(wh_stop_scm_10min_ad, 0,"Washington Heights: NYPD monthly pedestrian stops counts 500 meters buffer", -59:36)  
+
+# Permutation graph
+y <- make_perm_plot(wh_perm_10min_ad)
+
+# ATT
+att_wh10min_ad <- get_avg_att(wh_stop_scm_10min_ad)
+
+# RMSPE
+graph_data <- plot(wh_stop_scm_10min_ad) %>%
+    get_data()
+
+rmse_out <- graph_data %>%
+    mutate(timepoint = case_when(Time >= 0 ~ "Post",
+                                 Time < 0 ~ "Pre")) %>%
+    group_by(timepoint) %>%
+    summarize(RMSPE = sqrt(sum((Estimate)^2)/n())) %>%
+    pivot_wider(names_from = timepoint,
+                values_from = RMSPE) %>%
+    mutate(ratio = Post/Pre) %>%
+    mutate(graph_dat = list(graph_data))
+
+rmse_wh10min_ad <- rmse_out$Pre
+```
+
+## Permutations tests
+```{r eval=FALSE}
+wh_perm_10min_ad <- get_permutation_results(wh_stop_scm_10min_ad,
+                                       form,
+                                       w_10min,
+                                       0,
+                                       "ridge",
+                                       T)
+
+save(wh_perm_10min_ad, file = "wh_perm_10min_ad.Rda")
+```
+
+### Table + graph
+```{r}
+datatable(wh_perm_10min_ad)
+
+# Graph
+wh_perm_10min_ad <- wh_perm_10min_ad %>%
+  mutate(
+    treatment_label = case_when(
+      treatment == 1 ~ "Treatment",
+      is.na(treatment) ~ "Donor",
+      TRUE ~ "Control"
+    )
+  )
+
+ggplot(wh_perm_10min_ad, aes(x = ratio, fill = treatment_label)) +
+  geom_histogram(bins = 57, position = "identity", alpha = 0.6, color = "black") +
+  scale_fill_manual(
+    values = c("Donor" = "gray", "Treatment" = "red"),
+    name = "Group"
+  ) +
+  scale_x_continuous(
+    breaks = scales::pretty_breaks(n = 15),
+    name = "Permutation tests effects"
+  ) +
+  labs(y = "Count") +
+  theme_minimal(base_size = 13) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    legend.position = "top"
+  )
+```
+
+##  Balance Table 10-min WH
+```{r}
+create_balance_table(wh_stop_scm_10min_ad,wh_stop_scm_10min,treatment_name = "OnPoint Washington Heights", var_name = name)
+```
+
+# EH dataset
+```{r}
+eh_dataset_5min <- sqf_monthly_5min %>%
+  full_join(all_combos_5min, by = c("name", "biweekly_marker")) %>%
+  mutate(total_stops = if_else(is.na(total_stops), 0, total_stops),
+         treated = case_when(name %in% "OnPoint East Harlem" & biweekly_marker >= 0 ~ 1,
+                             TRUE ~ 0)) %>%
+  filter(name %in% "OnPoint Washington Heights" == FALSE) %>%
+  ungroup()
+
+eh_dataset_5min$year[eh_dataset_5min$biweekly_marker < -47] <- 2017
+eh_dataset_5min$year[eh_dataset_5min$biweekly_marker >= -47 & eh_dataset_5min$biweekly_marker< -35] <- 2018
+eh_dataset_5min$year[eh_dataset_5min$biweekly_marker >= -35 & eh_dataset_5min$biweekly_marker< -23] <- 2019
+eh_dataset_5min$year[eh_dataset_5min$biweekly_marker >= -23 & eh_dataset_5min$biweekly_marker< -11] <- 2020
+eh_dataset_5min$year[eh_dataset_5min$biweekly_marker >= -11 & eh_dataset_5min$biweekly_marker< 1] <- 2021
+eh_dataset_5min$year[eh_dataset_5min$biweekly_marker >= 1 & eh_dataset_5min$biweekly_marker< 13] <- 2022
+eh_dataset_5min$year[eh_dataset_5min$biweekly_marker >= 13 & eh_dataset_5min$biweekly_marker< 25] <- 2023
+eh_dataset_5min$year[eh_dataset_5min$biweekly_marker >= 25] <- 2024
+
+eh_dataset_10min <- sqf_monthly_10min %>%
+  full_join(all_combos_10min, by = c("name", "biweekly_marker")) %>%
+  mutate(total_stops = if_else(is.na(total_stops), 0, total_stops),
+         treated = case_when(name %in% "OnPoint East Harlem" & biweekly_marker >= 0 ~ 1,
+                             TRUE ~ 0)) %>%
+  filter(name %in% "OnPoint Washington Heights" == FALSE) %>%
+  ungroup()
+
+```
+
+## Merge with covars
+```{r}
+eh_dataset_5min <- merge(eh_dataset_5min, df_5min_covar, by=c("name", "year"), all.x = T)
+eh_dataset_10min <- merge(eh_dataset_10min, df_10min_covar, by=c("name", "year"), all.x = T)
+
+eh_dataset_5min <- merge(eh_dataset_5min, foot_5min_montly, by=c("name", "biweekly_marker"), all.x = T)
+eh_dataset_10min <- merge(eh_dataset_10min, foot_10min_montly, by=c("name", "biweekly_marker"), all.x = T)
+
+eh_dataset_5min <- eh_dataset_5min %>%
+  select(-my.y)
+
+eh_dataset_10min <- eh_dataset_10min %>%
+  select(-my.y)
+
+year_biweekly_lu <- eh_dataset_5min %>%
+  select(new_year = year, biweekly_marker) %>%
+  distinct() %>%
+  drop_na()
+
+eh_dataset_5min <- eh_dataset_5min %>%
+  left_join(year_biweekly_lu, by = "biweekly_marker") %>%
+  left_join(gentri_5min, by = c("name", c("new_year" = "year")))
+  
+eh_dataset_10min <- eh_dataset_10min %>%
+  left_join(year_biweekly_lu, by = "biweekly_marker") %>%
+  left_join(gentri_10min, by = c("name", c("new_year" = "year")))
+```
+
+### Median
+```{r eval=FALSE}
+eh_dataset_5min <- eh_dataset_5min %>%
+  mutate(
+    eh = case_when(name == "OnPoint East Harlem" ~ 1,
+                   TRUE ~ 0),
+    pre = case_when(biweekly_marker < 0 ~ 1,
+                    TRUE ~ 0),
+    post = case_when(biweekly_marker >= 0 ~ 1,
+                     TRUE ~ 0))
+
+median_5min <- tableby(post ~ wt(total_stops),  # Disruptive events and For-profit crimes                       
+                  data = eh_dataset_5min, numeric.stats=c("median", "q1q3", "Nmiss", "N"), strata = eh,
+                  digits=3, digits.p=3, digits.pct=3)
+
+eh_dataset_10min <- eh_dataset_10min %>%
+  mutate(
+    eh = case_when(name == "OnPoint East Harlem" ~ 1,
+                   TRUE ~ 0),
+    pre = case_when(biweekly_marker < 0 ~ 1,
+                    TRUE ~ 0),
+    post = case_when(biweekly_marker >= 0 ~ 1,
+                     TRUE ~ 0))
+median_10min <- tableby(post ~ wt(total_stops),  # Disruptive events and For-profit crimes                       
+                  data = eh_dataset_10min, numeric.stats=c("median", "q1q3", "Nmiss", "N"), strata = eh,
+                  digits=3, digits.p=3, digits.pct=3)
+```
+
+# EH SCM - counts 5min unadjusted
+```{r}
+load("eh_perm_5min.Rda")
+
+form <- "total_stops ~ treated"
+
+eh_stop_scm_5min <- augsynth(form = as.formula(form), 
+                        unit = name,
+                        time = biweekly_marker,
+                        data = eh_dataset_5min,
+                        residualize = T)
+
+# Graph
+d1 <- make_observed_plot(eh_stop_scm_5min, 0,"East Harlem: NYPD monthly pedestrian stops counts 300 meters buffer", -59:36) 
+
+# ATT
+att_eh5min <- get_avg_att(eh_stop_scm_5min)
+
+# RMSPE
+graph_data <- plot(eh_stop_scm_5min) %>%
+    get_data()
+
+rmse_out <- graph_data %>%
+    mutate(timepoint = case_when(Time >= 0 ~ "Post",
+                                 Time < 0 ~ "Pre")) %>%
+    group_by(timepoint) %>%
+    summarize(RMSPE = sqrt(sum((Estimate)^2)/n())) %>%
+    pivot_wider(names_from = timepoint,
+                values_from = RMSPE) %>%
+    mutate(ratio = Post/Pre) %>%
+    mutate(graph_dat = list(graph_data))
+
+rmse_eh5min <- rmse_out$Pre
+```
+
+## Permutations tests
+```{r eval=FALSE}
+eh_perm_5min <- get_permutation_results(eh_stop_scm_5min,
+                                       form,
+                                       w_5min,
+                                       0,
+                                       "ridge",
+                                       T)
+
+save(eh_perm_5min, file = "eh_perm_5min.Rda")
+```
+
+### Table
+```{r}
+datatable(eh_perm_5min)
+```
+
+# EH SCM - counts 5min adjusted
+```{r}
+load("eh_perm_5min_ad.Rda")
+
+form <- "total_stops ~ treated | tot_pop + md_age + p_male + p_black + p_white + p_latino + p_employed + p_hsch_16d + p_poverty + md_value + md_yr_bld + p_vcnt_h + median_visits + gent"
+
+eh_stop_scm_5min_ad <- augsynth(form = as.formula(form), 
+                        unit = name,
+                        time = biweekly_marker,
+                        data = eh_dataset_5min,
+                        residualize = T)
+
+
+# Graph
+d <- make_observed_plot(eh_stop_scm_5min_ad, 0,"East Harlem: NYPD monthly pedestrian stops counts 300 meters buffer", -59:36)  
+
+# Permutation graph
+w <- make_perm_plot(eh_perm_5min_ad)
+
+# ATT
+att_eh5min_ad <- get_avg_att(eh_stop_scm_5min_ad)
+
+# RMSPE
+graph_data <- plot(eh_stop_scm_5min_ad) %>%
+    get_data()
+
+rmse_out <- graph_data %>%
+    mutate(timepoint = case_when(Time >= 0 ~ "Post",
+                                 Time < 0 ~ "Pre")) %>%
+    group_by(timepoint) %>%
+    summarize(RMSPE = sqrt(sum((Estimate)^2)/n())) %>%
+    pivot_wider(names_from = timepoint,
+                values_from = RMSPE) %>%
+    mutate(ratio = Post/Pre) %>%
+    mutate(graph_dat = list(graph_data))
+
+rmse_eh5min_ad <- rmse_out$Pre
+```
+
+## Permutations tests
+```{r eval=FALSE}
+eh_perm_5min_ad <- get_permutation_results(eh_stop_scm_5min_ad,
+                                       form,
+                                       w_5min,
+                                       0,
+                                       "ridge",
+                                       T)
+
+save(eh_perm_5min_ad, file = "eh_perm_5min_ad.Rda")
+```
+
+### Table + Graph
+```{r}
+datatable(eh_perm_5min_ad)
+
+eh_perm_5min_ad <- eh_perm_5min_ad %>%
+  mutate(
+    treatment_label = case_when(
+      treatment == 1 ~ "Treatment",
+      is.na(treatment) ~ "Donor",
+      TRUE ~ "Control"
+    )
+  )
+
+
+ggplot(eh_perm_5min_ad, aes(x = ratio, fill = treatment_label)) +
+  geom_histogram(bins = 57, position = "identity", alpha = 0.6, color = "black") +
+  scale_fill_manual(
+    values = c("Donor" = "gray", "Treatment" = "red"),
+    name = "Group"
+  ) +
+  scale_x_continuous(
+    breaks = scales::pretty_breaks(n = 15),
+    name = "Permutation tests effects"
+  ) +
+  labs(y = "Count") +
+  theme_minimal(base_size = 13) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    legend.position = "top"
+  )
+```
+
+## Balance table 5-min EH
+```{r}
+create_balance_table(eh_stop_scm_5min_ad,eh_stop_scm_5min,treatment_name = "OnPoint East Harlem", var_name = name)
+```
+
+# EH SCM - counts 10min unadjusted
+```{r}
+load("eh_perm_10min.Rda")
+
+form <- "total_stops ~ treated"
+
+eh_stop_scm_10min <- augsynth(form = as.formula(form), 
+                        unit = name,
+                        time = biweekly_marker,
+                        data = eh_dataset_10min,
+                        residualize = T)
+
+# Graph
+e1 <- make_observed_plot(eh_stop_scm_10min, 0,"East Harlem: NYPD monthly pedestrian stops counts 500 meters buffer", -59:36) 
+
+# ATT
+att_eh10min <- get_avg_att(eh_stop_scm_10min)
+
+# RMSPE
+graph_data <- plot(eh_stop_scm_10min) %>%
+    get_data()
+
+rmse_out <- graph_data %>%
+    mutate(timepoint = case_when(Time >= 0 ~ "Post",
+                                 Time < 0 ~ "Pre")) %>%
+    group_by(timepoint) %>%
+    summarize(RMSPE = sqrt(sum((Estimate)^2)/n())) %>%
+    pivot_wider(names_from = timepoint,
+                values_from = RMSPE) %>%
+    mutate(ratio = Post/Pre) %>%
+    mutate(graph_dat = list(graph_data))
+
+rmse_eh10min <- rmse_out$Pre
+```
+
+## Permutations tests
+```{r eval=FALSE}
+eh_perm_10min <- get_permutation_results(eh_stop_scm_10min,
+                                       form,
+                                       w_10min,
+                                       0,
+                                       "ridge",
+                                       T)
+
+save(eh_perm_10min, file = "eh_perm_10min.Rda")
+```
+
+### Table
+```{r}
+datatable(eh_perm_10min)
+```
+
+# EH SCM - counts 10min adjusted 
+```{r}
+load("eh_perm_10min_ad.Rda")
+
+form <- "total_stops ~ treated | tot_pop + md_age + p_male + p_black + p_white + p_latino + p_employed + p_hsch_16d + p_poverty + md_value + md_yr_bld + p_vcnt_h + median_visits + gent"
+
+eh_stop_scm_10min_ad <- augsynth(form = as.formula(form), 
+                        unit = name,
+                        time = biweekly_marker,
+                        data = eh_dataset_10min,
+                        residualize = T)
+
+# Graph
+e <- make_observed_plot(eh_stop_scm_10min_ad, 0,"East Harlem: NYPD monthly pedestrian stops counts 500 meters buffer", -59:36)  
+
+# Permutation test graph
+v <- make_perm_plot(eh_perm_10min_ad)
+
+# ATT
+att_eh10min_ad <- get_avg_att(eh_stop_scm_10min_ad)
+
+# RMSPE
+graph_data <- plot(eh_stop_scm_10min_ad) %>%
+    get_data()
+
+rmse_out <- graph_data %>%
+    mutate(timepoint = case_when(Time >= 0 ~ "Post",
+                                 Time < 0 ~ "Pre")) %>%
+    group_by(timepoint) %>%
+    summarize(RMSPE = sqrt(sum((Estimate)^2)/n())) %>%
+    pivot_wider(names_from = timepoint,
+                values_from = RMSPE) %>%
+    mutate(ratio = Post/Pre) %>%
+    mutate(graph_dat = list(graph_data))
+
+rmse_eh10min_ad <- rmse_out$Pre
+```
+
+## Permutations tests
+```{r eval=FALSE}
+eh_perm_10min_ad <- get_permutation_results(eh_stop_scm_10min_ad,
+                                       form,
+                                       w_10min,
+                                       0,
+                                       "ridge",
+                                       T)
+
+save(eh_perm_10min_ad, file = "eh_perm_10min_ad.Rda")
+```
+
+### Table + Graph
+```{r}
+datatable(eh_perm_10min_ad)
+
+# Graph
+eh_perm_10min_ad <- eh_perm_10min_ad %>%
+  mutate(
+    treatment_label = case_when(
+      treatment == 1 ~ "Treatment",
+      is.na(treatment) ~ "Donor",
+      TRUE ~ "Control"
+    )
+  )
+
+
+ggplot(eh_perm_10min_ad, aes(x = ratio, fill = treatment_label)) +
+  geom_histogram(bins = 57, position = "identity", alpha = 0.6, color = "black") +
+  scale_fill_manual(
+    values = c("Donor" = "gray", "Treatment" = "red"),
+    name = "Group"
+  ) +
+  scale_x_continuous(
+    breaks = scales::pretty_breaks(n = 15),
+    name = "Permutation tests effects"
+  ) +
+  labs(y = "Count") +
+  theme_minimal(base_size = 13) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    legend.position = "top"
+  )
+```
+
+## Balance table 10-min EH
+```{r}
+create_balance_table(eh_stop_scm_10min_ad,eh_stop_scm_10min,treatment_name = "OnPoint East Harlem", var_name = name)
+```
+
+
+# Table with ATTs and RMSPE
+```{r}
+l = c(att_wh5min, rmse_wh5min, att_wh5min_ad, rmse_wh5min_ad)
+m = c(att_wh10min, rmse_wh10min, att_wh10min_ad, rmse_wh10min_ad)
+
+round(l,2)
+round(m,2)
+
+
+l1 = c(att_eh5min, rmse_eh5min, att_eh5min_ad, rmse_eh5min_ad)
+m1 = c(att_eh10min, rmse_eh10min, att_eh10min_ad, rmse_eh10min_ad)
+
+round(l1,2)
+round(m1,2)
+```
+
+# Graphs
+```{r}
+(a | d) /
+(b | e) /
+
+ggsave("fig_1.png", width = 15, height = 6)
+
+(a1 | a) /
+(b1 | b) /
+
+ggsave("fig_s1.png", width = 15, height = 6)
+
+(d1 | d) /
+(e1 | e) /
+
+ggsave("fig_s2.png", width = 15, height = 6)
+
+(z | w) /
+(y | v) /
+
+ggsave("fig_s3.png", width = 15, height = 6)
+
+```
+
